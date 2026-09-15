@@ -7,6 +7,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from holoqa.project_inspection import inspect_workspace
+from holoqa.project_store import ProjectStore
 
 server = MCPServer(
     name="holoqa",
@@ -32,6 +33,26 @@ server.add_tool(
     holoqa_project_inspect,
     name="holoqa_project_inspect",
     description="Inspect the current local workspace and report project configuration signals.",
+    structured_output=True,
+)
+
+
+def holoqa_initialize_project(workspace_root: str, state_database: str | None = None) -> dict[str, Any]:
+    """Create or update a project and persist a snapshot for the current workspace."""
+    workspace = Path(workspace_root).expanduser().resolve()
+    database = Path(state_database) if state_database else workspace / ".holoqa" / "state.db"
+    initialization = ProjectStore(database).initialize(workspace)
+    return {
+        "status": "completed",
+        **initialization.model_dump(),
+        "next_actions": ["query_codegraph", "create_run_plan"],
+    }
+
+
+server.add_tool(
+    holoqa_initialize_project,
+    name="holoqa_initialize_project",
+    description="Initialize a HoloQA project for a local workspace and create a pinned snapshot.",
     structured_output=True,
 )
 

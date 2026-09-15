@@ -14,7 +14,21 @@ uv run pytest -q
 uv run holoqa-mcp
 ```
 
-The MCP server uses stdio so it can be connected to an MCP-capable coding client.
+Start the dashboard locally:
+
+```bash
+uv run holoqa-dashboard
+# open http://127.0.0.1:8000
+```
+
+Or run the dashboard with Docker:
+
+```bash
+docker compose up --build
+# open http://127.0.0.1:8000
+```
+
+The MCP server uses stdio so it can be connected to an MCP-capable coding client. It currently exposes `holoqa_project_inspect` and `holoqa_initialize_project`.
 
 ## Documents
 

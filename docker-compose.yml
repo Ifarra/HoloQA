@@ -1,0 +1,11 @@
+services:
+  holoqa:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - holoqa-state:/app/.holoqa
+    restart: unless-stopped
+
+volumes:
+  holoqa-state:

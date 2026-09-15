@@ -11,6 +11,8 @@ requires-python = ">=3.11"
 dependencies = [
   "mcp>=1.0.0",
   "pydantic>=2.0.0",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
 ]
 
 [dependency-groups]
@@ -20,6 +22,7 @@ dev = [
 
 [project.scripts]
 holoqa-mcp = "holoqa.mcp_server:main"
+holoqa-dashboard = "holoqa.dashboard:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
