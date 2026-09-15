@@ -1,11 +1,31 @@
 services:
   holoqa:
     build: .
+    environment:
+      HOLOQA_STATE: /data/.holoqa/state.db
     ports:
       - "8000:8000"
     volumes:
-      - holoqa-state:/app/.holoqa
+      - holoqa-data:/data
+      - ./workspace:/workspace
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  demo-app:
+    build: .
+    entrypoint: [".venv/bin/holoqa-demo"]
+    ports:
+      - "8765:8765"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
 volumes:
-  holoqa-state:
+  holoqa-data:

@@ -33,7 +33,10 @@ class RunStore:
                     plan_id TEXT PRIMARY KEY, project_id TEXT, cases TEXT, approved INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS runs (
-                    run_id TEXT PRIMARY KEY, plan_id TEXT, status TEXT, message TEXT
+                    run_id TEXT PRIMARY KEY, plan_id TEXT, status TEXT, message TEXT, results TEXT DEFAULT '[]'
+                );
+                CREATE TABLE IF NOT EXISTS evidence (
+                    evidence_id TEXT PRIMARY KEY, run_id TEXT, test_id TEXT, artifact_path TEXT, kind TEXT
                 );
                 """
             )
@@ -60,8 +63,38 @@ class RunStore:
         else:
             run = Run(run_id=f"run_{uuid.uuid4().hex[:12]}", plan_id=plan_id, status="PASS", message="MVP execution completed")
         with sqlite3.connect(self.path) as db:
-            db.execute("INSERT INTO runs VALUES (?, ?, ?, ?)", (run.run_id, run.plan_id, run.status, run.message))
+            db.execute("INSERT INTO runs VALUES (?, ?, ?, ?, ?)", (run.run_id, run.plan_id, run.status, run.message, "[]"))
         return run
+
+    def get_plan(self, plan_id: str) -> Plan:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT plan_id, project_id, cases, approved FROM plans WHERE plan_id=?", (plan_id,)).fetchone()
+        if not row:
+            raise ValueError(f"plan not found: {plan_id}")
+        return Plan(plan_id=row[0], project_id=row[1], cases=json.loads(row[2]), approved=bool(row[3]))
+
+    def complete(self, run_id: str, status: str, message: str, results: list[dict]) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE runs SET status=?, message=?, results=? WHERE run_id=?", (status, message, json.dumps(results), run_id))
+            for result in results:
+                for artifact_path in str(result.get("evidence", "")).split(";"):
+                    if artifact_path:
+                        db.execute(
+                            "INSERT INTO evidence VALUES (?, ?, ?, ?, ?)",
+                            (f"evidence_{uuid.uuid4().hex[:12]}", run_id, result.get("test_id", ""), artifact_path, "screenshot"),
+                        )
+
+    def results(self, run_id: str) -> list[dict]:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT results FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        if not row:
+            raise ValueError(f"run not found: {run_id}")
+        return json.loads(row[0] or "[]")
+
+    def evidence(self, run_id: str) -> list[dict[str, str]]:
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute("SELECT evidence_id, run_id, test_id, artifact_path, kind FROM evidence WHERE run_id=?", (run_id,)).fetchall()
+        return [{"evidence_id": row[0], "run_id": row[1], "test_id": row[2], "artifact_path": row[3], "kind": row[4]} for row in rows]
 
     def list_runs(self) -> list[dict[str, str]]:
         with sqlite3.connect(self.path) as db:

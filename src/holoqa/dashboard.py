@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from holoqa.project_store import ProjectStore
 from holoqa.runs import RunStore
@@ -25,9 +25,20 @@ def create_app(database_path: Path) -> FastAPI:
     @app.get("/api/runs/{run_id}")
     def run_status(run_id: str) -> dict[str, object]:
         try:
-            return RunStore(database_path).get(run_id).model_dump()
+            runs = RunStore(database_path)
+            return {**runs.get(run_id).model_dump(), "results": runs.results(run_id), "evidence": runs.evidence(run_id)}
         except ValueError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.get("/api/runs/{run_id}/evidence/{evidence_id}")
+    def evidence_file(run_id: str, evidence_id: str) -> FileResponse:
+        matches = [item for item in RunStore(database_path).evidence(run_id) if item["evidence_id"] == evidence_id]
+        if not matches:
+            raise HTTPException(status_code=404, detail="evidence not found")
+        path = Path(matches[0]["artifact_path"])
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="artifact file not found")
+        return FileResponse(path)
 
     @app.get("/api/runs")
     def runs() -> dict[str, object]:
@@ -78,4 +89,5 @@ th {{ color:#94a3b8; font-size:13px; text-transform:uppercase; }}
 def main() -> None:
     import uvicorn
 
-    uvicorn.run(create_app(Path(".holoqa/state.db")), host="127.0.0.1", port=8000)
+    database = Path(__import__("os").environ.get("HOLOQA_STATE", ".holoqa/state.db"))
+    uvicorn.run(create_app(database), host="0.0.0.0", port=8000)

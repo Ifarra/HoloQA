@@ -6,9 +6,9 @@ from pathlib import Path
 from holoqa.workbook import export_results
 
 
-def export_json(path: Path, run: dict, results: list[dict]) -> Path:
+def export_json(path: Path, run: dict, results: list[dict], evidence: list[dict] | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"run": run, "results": results}, indent=2), encoding="utf-8")
+    path.write_text(json.dumps({"run": run, "results": results, "evidence": evidence or []}, indent=2), encoding="utf-8")
     return path
 
 

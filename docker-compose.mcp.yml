@@ -1,0 +1,14 @@
+services:
+  holoqa-mcp:
+    build: .
+    entrypoint: [".venv/bin/holoqa-mcp"]
+    stdin_open: true
+    tty: false
+    environment:
+      HOLOQA_STATE: /data/.holoqa/state.db
+    volumes:
+      - holoqa-data:/data
+      - ./workspace:/workspace
+
+volumes:
+  holoqa-data:
