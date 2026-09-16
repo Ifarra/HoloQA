@@ -41,6 +41,16 @@ def create_app(database_path: Path) -> FastAPI:
     def projects() -> dict[str, object]:
         return {"projects": store.projects()}
 
+    @app.post("/api/projects/initialize")
+    def initialize_project(payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
+        workspace_root = str(payload.get("workspace_root") or "")
+        if not workspace_root:
+            raise HTTPException(status_code=400, detail="workspace_root is required")
+        try:
+            return store.initialize(Path(workspace_root)).model_dump()
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
     @app.get("/api/plans")
     def plans() -> dict[str, object]:
         return {"plans": RunStore(database_path).list_plans()}
@@ -111,12 +121,34 @@ def create_app(database_path: Path) -> FastAPI:
     @app.get("/api/findings")
     def findings() -> dict[str, object]:
         run_store = RunStore(database_path)
-        items = []
+        items = run_store.list_findings()
+        existing = {(item["run_id"], item.get("test_id")) for item in items}
         for run in run_store.list_runs():
             for result in run_store.results(run["run_id"]):
-                if result.get("status") != "PASS":
-                    items.append({"finding_id": f"finding_{run['run_id']}_{result.get('test_id', 'unknown')}", "run_id": run["run_id"], "test_id": result.get("test_id"), "status": result.get("status"), "title": result.get("title") or result.get("test_id"), "expected": result.get("expected_result", ""), "actual": result.get("actual_result", ""), "evidence": result.get("evidence_items", [])})
+                if result.get("status") != "PASS" and (run["run_id"], result.get("test_id")) not in existing:
+                    items.append({"finding_id": f"finding_{run['run_id']}_{result.get('test_id', 'unknown')}", "run_id": run["run_id"], "test_id": result.get("test_id"), "status": result.get("status"), "state": "untriaged", "severity": "medium", "title": result.get("title") or result.get("test_id"), "expected": result.get("expected_result", ""), "actual": result.get("actual_result", ""), "evidence": result.get("evidence_items", [])})
         return {"findings": items}
+
+    @app.post("/api/findings")
+    def create_finding(payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
+        try:
+            return RunStore(database_path).create_finding(str(payload["run_id"]), str(payload.get("test_id") or ""), str(payload.get("title") or "Untitled finding"), str(payload.get("status") or "FAIL"), str(payload.get("expected") or ""), str(payload.get("actual") or ""), str(payload.get("severity") or "medium"))
+        except (KeyError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/api/findings/{finding_id}")
+    def finding_status(finding_id: str) -> dict[str, object]:
+        try:
+            return RunStore(database_path).finding(finding_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.patch("/api/findings/{finding_id}")
+    def update_finding(finding_id: str, payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
+        try:
+            return RunStore(database_path).update_finding(finding_id, state=str(payload["state"]) if "state" in payload else None, severity=str(payload["severity"]) if "severity" in payload else None)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
 
     @app.get("/api/runs/{run_id}/events")
     def run_events(run_id: str, after_id: int = 0) -> dict[str, object]:

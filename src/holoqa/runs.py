@@ -63,6 +63,11 @@ class RunStore:
                 CREATE TABLE IF NOT EXISTS evidence (
                     evidence_id TEXT PRIMARY KEY, run_id TEXT, test_id TEXT, artifact_path TEXT, kind TEXT
                 );
+                CREATE TABLE IF NOT EXISTS findings (
+                    finding_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, test_id TEXT, title TEXT NOT NULL,
+                    status TEXT NOT NULL, severity TEXT DEFAULT 'medium', state TEXT DEFAULT 'open',
+                    expected TEXT DEFAULT '', actual TEXT DEFAULT '', evidence TEXT DEFAULT '[]', created_at TEXT NOT NULL
+                );
                 """
             )
             columns = {row[1] for row in db.execute("PRAGMA table_info(plans)")}
@@ -208,6 +213,38 @@ class RunStore:
         with sqlite3.connect(self.path) as db:
             rows = db.execute("SELECT evidence_id, run_id, test_id, artifact_path, kind FROM evidence WHERE run_id=?", (run_id,)).fetchall()
         return [{"evidence_id": row[0], "run_id": row[1], "test_id": row[2], "artifact_path": row[3], "kind": row[4]} for row in rows]
+
+    def create_finding(self, run_id: str, test_id: str, title: str, status: str, expected: str = "", actual: str = "", severity: str = "medium") -> dict[str, object]:
+        finding_id = f"finding_{uuid.uuid4().hex[:12]}"
+        now = self._now()
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO findings(finding_id, run_id, test_id, title, status, severity, state, expected, actual, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)", (finding_id, run_id, test_id, title, status, severity, expected, actual, "[]", now))
+        return self.finding(finding_id)
+
+    def finding(self, finding_id: str) -> dict[str, object]:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT finding_id, run_id, test_id, title, status, severity, state, expected, actual, evidence, created_at FROM findings WHERE finding_id=?", (finding_id,)).fetchone()
+        if not row:
+            raise ValueError(f"finding not found: {finding_id}")
+        return {"finding_id": row[0], "run_id": row[1], "test_id": row[2], "title": row[3], "status": row[4], "severity": row[5], "state": row[6], "expected": row[7], "actual": row[8], "evidence": json.loads(row[9] or "[]"), "created_at": row[10]}
+
+    def list_findings(self) -> list[dict[str, object]]:
+        with sqlite3.connect(self.path) as db:
+            ids = [row[0] for row in db.execute("SELECT finding_id FROM findings ORDER BY created_at DESC").fetchall()]
+        return [self.finding(finding_id) for finding_id in ids]
+
+    def update_finding(self, finding_id: str, *, state: str | None = None, severity: str | None = None) -> dict[str, object]:
+        updates, values = [], []
+        if state is not None:
+            updates.append("state=?"); values.append(state)
+        if severity is not None:
+            updates.append("severity=?"); values.append(severity)
+        if updates:
+            values.append(finding_id)
+            with sqlite3.connect(self.path) as db:
+                if db.execute(f"UPDATE findings SET {', '.join(updates)} WHERE finding_id=?", values).rowcount == 0:
+                    raise ValueError(f"finding not found: {finding_id}")
+        return self.finding(finding_id)
 
     def list_runs(self) -> list[dict[str, str]]:
         with sqlite3.connect(self.path) as db:
