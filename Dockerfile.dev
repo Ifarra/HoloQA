@@ -1,0 +1,11 @@
+FROM mcr.microsoft.com/playwright/python:v1.52.0-noble
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOLOQA_STATE=/data/.holoqa/state.db \
+    PYTHONPATH=/app/src
+
+RUN pip install --no-cache-dir uv
+
+EXPOSE 8000 8765

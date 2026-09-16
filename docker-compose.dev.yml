@@ -1,0 +1,61 @@
+services:
+  holoqa:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    working_dir: /app
+    command: ["sh", "-c", "uv sync --dev && uv run uvicorn holoqa.dashboard:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/src"]
+    environment:
+      HOLOQA_STATE: /data/.holoqa/state.db
+      PYTHONPATH: /app/src
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - holoqa-dev-venv:/app/.venv
+      - holoqa-dev-data:/data
+      - ./workspace:/workspace
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  demo-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    working_dir: /app
+    command: ["sh", "-c", "uv sync --dev && uv run uvicorn holoqa.demo_app:create_demo_app --factory --host 0.0.0.0 --port 8765 --reload --reload-dir /app/src"]
+    environment:
+      PYTHONPATH: /app/src
+    ports:
+      - "8765:8765"
+    volumes:
+      - .:/app
+      - holoqa-dev-venv:/app/.venv
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    working_dir: /app
+    command: ["uv", "run", "--no-sync", "holoqa-mcp"]
+    environment:
+      HOLOQA_STATE: /data/.holoqa/state.db
+      PYTHONPATH: /app/src
+    stdin_open: true
+    volumes:
+      - .:/app
+      - holoqa-dev-venv:/app/.venv
+      - holoqa-dev-data:/data
+      - ./workspace:/workspace
+
+volumes:
+  holoqa-dev-venv:
+  holoqa-dev-data:
