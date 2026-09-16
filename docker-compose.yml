@@ -7,7 +7,7 @@ services:
       - "8000:8000"
     volumes:
       - holoqa-data:/data
-      - ./workspace:/workspace
+      - ./:/workspace
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 10s
@@ -25,6 +25,21 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        HOLOQA_API_URL: http://holoqa:8000
+    environment:
+      HOLOQA_API_URL: http://holoqa:8000
+    ports:
+      - "3001:3001"
+    depends_on:
+      holoqa:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

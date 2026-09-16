@@ -93,9 +93,14 @@ uv sync --dev
 uv run pytest -q
 ```
 
+The reproducible demo workbook is at `fixtures/demo_cases.xlsx`. Regenerate it with
+`uv run python scripts/create_demo_workbook.py`. The demo supports an intentional
+server failure for negative testing when started with `HOLOQA_DEMO_FAILURE=1`.
+
 ## Documents
 
-- `MVP.md` — Docker MVP scope and runbook.
-- `MCP_FIRST_ARCHITECTURE.md` — product and MCP architecture.
-- `PROJECT_PLAN.md` — broader platform plan.
-- `IDEA.md` — original SIT/UAT product notes.
+- `docs/MVP_RUNBOOK.md` — Docker MVP scope and runbook.
+- `docs/ARCHITECTURE.md` — product and MCP architecture.
+- `docs/PRODUCT_PLAN.md` — canonical product plan and scope.
+- `docs/MILESTONES.md` — active delivery milestones.
+- `docs/testing/JUICESHOP_TEST_PLAN.md` — Juice Shop validation matrix.

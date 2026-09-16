@@ -1,0 +1,4 @@
+export type Project = { project_id:string; project_name:string; workspace_root:string; created_at:string }
+export type Run = { run_id:string; plan_id:string; status:string; message:string; current_test_id?:string; current_step?:string; completed_cases:number; total_cases:number; results?:Record<string, unknown>[]; evidence?:Record<string, string>[] }
+export type Plan = { plan_id:string; project_id:string; name:string; approved:boolean; environment:string; case_count:number }
+export async function api<T>(path:string, init?:RequestInit):Promise<T> { const response = await fetch(`/api${path}`, { ...init, headers:{'Content-Type':'application/json', ...(init?.headers || {})}, cache:'no-store' }); const data = await response.json(); if (!response.ok) throw new Error(data.detail || 'HoloQA API request failed'); return data }

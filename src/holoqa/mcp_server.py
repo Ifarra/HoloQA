@@ -7,6 +7,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from holoqa.browser_runner import execute_cases
+from holoqa.execution_service import cancel_run, start_background_run
 from holoqa.project_inspection import inspect_workspace
 from holoqa.project_store import ProjectStore
 from holoqa.reports import export_html, export_json
@@ -51,9 +52,9 @@ def holoqa_import_test_workbook(workbook_path: str, state_database: str) -> dict
     return {"status": "validated", "source": str(Path(workbook_path).resolve()), "cases": cases}
 
 
-def holoqa_create_run_plan(project_id: str, cases: list[dict[str, Any]], state_database: str) -> dict[str, Any]:
+def holoqa_create_run_plan(project_id: str, cases: list[dict[str, Any]], state_database: str, environment: str = "local", snapshot_id: str | None = None) -> dict[str, Any]:
     """Create a reviewable test plan; this operation does not execute tests."""
-    plan = RunStore(Path(state_database)).create_plan(project_id, cases)
+    plan = RunStore(Path(state_database)).create_plan(project_id, cases, environment=environment, snapshot_id=snapshot_id)
     return {"status": "awaiting_approval", **plan.model_dump(), "requires_approval": True}
 
 
@@ -71,8 +72,8 @@ def holoqa_execute_run(plan_id: str, state_database: str, base_url: str | None =
     if run.status == "BLOCKED":
         return run.model_dump()
     if not base_url:
-        simulated_results = [{"test_id": case["test_id"], "status": "PASS", "actual_result": "Simulated pass", "evidence": ""} for case in plan.cases]
-        store.complete(run.run_id, "PASS", f"Simulated execution of {len(plan.cases)} test case(s)", simulated_results)
+        simulated_results = [{"test_id": case["test_id"], "status": "PASS", "actual_result": "Simulated pass (no browser target configured)", "evidence": "", "execution_mode": "simulated"} for case in plan.cases]
+        store.complete(run.run_id, "PASS", f"SIMULATED execution of {len(plan.cases)} test case(s)", simulated_results, execution_mode="simulated")
         completed = store.get(run.run_id)
         return {**completed.model_dump(), "results": store.results(run.run_id), "evidence": store.evidence(run.run_id)}
     results = execute_cases(plan.cases, base_url, Path(state_database).parent / "artifacts" / run.run_id)
@@ -94,6 +95,21 @@ def holoqa_get_run_status(run_id: str, state_database: str) -> dict[str, Any]:
 def holoqa_get_evidence(run_id: str, state_database: str) -> dict[str, Any]:
     """Return evidence records for a completed run."""
     return {"run_id": run_id, "evidence": RunStore(Path(state_database)).evidence(run_id)}
+
+
+def holoqa_start_run(plan_id: str, state_database: str, base_url: str) -> dict[str, Any]:
+    """Queue an approved run and return immediately for live monitoring."""
+    return start_background_run(plan_id, state_database, base_url)
+
+
+def holoqa_get_run_events(run_id: str, state_database: str, after_id: int = 0) -> dict[str, Any]:
+    """Read durable execution events after an event cursor."""
+    return {"run_id": run_id, "events": RunStore(Path(state_database)).events(run_id, after_id=after_id)}
+
+
+def holoqa_cancel_run(run_id: str, state_database: str) -> dict[str, Any]:
+    """Request cancellation of a queued or running browser job."""
+    return cancel_run(run_id, state_database)
 
 
 def holoqa_export_report(
@@ -129,6 +145,9 @@ server.add_tool(holoqa_approve_run, name="holoqa_approve_run", description="Appr
 server.add_tool(holoqa_execute_run, name="holoqa_execute_run", description="Execute an approved MVP run plan.", structured_output=True)
 server.add_tool(holoqa_get_run_status, name="holoqa_get_run_status", description="Read the current status of a run with results and evidence.", structured_output=True)
 server.add_tool(holoqa_get_evidence, name="holoqa_get_evidence", description="List evidence artifacts for a run.", structured_output=True)
+server.add_tool(holoqa_start_run, name="holoqa_start_run", description="Queue an approved run for background execution.", structured_output=True)
+server.add_tool(holoqa_get_run_events, name="holoqa_get_run_events", description="Read live execution events for a run.", structured_output=True)
+server.add_tool(holoqa_cancel_run, name="holoqa_cancel_run", description="Request cancellation of a running job.", structured_output=True)
 server.add_tool(holoqa_export_report, name="holoqa_export_report", description="Generate JSON, HTML, and XLSX report artifacts.", structured_output=True)
 
 

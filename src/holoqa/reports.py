@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import html
 from pathlib import Path
 
 from holoqa.workbook import export_results
@@ -15,7 +16,7 @@ def export_json(path: Path, run: dict, results: list[dict], evidence: list[dict]
 def export_html(path: Path, run: dict, results: list[dict]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = "".join(
-        f"<tr><td>{r.get('test_id','')}</td><td>{r.get('status','')}</td><td>{r.get('actual_result','')}</td></tr>"
+        f"<tr><td>{html.escape(str(r.get('test_id','')))}</td><td>{html.escape(str(r.get('status','')))}</td><td>{html.escape(str(r.get('actual_result','')))}</td></tr>"
         for r in results
     )
     path.write_text(

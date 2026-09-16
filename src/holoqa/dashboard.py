@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import time
 from pathlib import Path
 
 
@@ -12,9 +13,10 @@ DEFAULT_STATE_DATABASE = ".holoqa/state.db"
 def default_database_path() -> Path:
     return Path(os.environ.get("HOLOQA_STATE", DEFAULT_STATE_DATABASE))
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import Body, FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
+from holoqa.execution_service import start_background_run
 from holoqa.project_store import ProjectStore
 from holoqa.runs import RunStore
 
@@ -24,7 +26,7 @@ def _esc(value: object) -> str:
 
 
 def _status_class(status: str) -> str:
-    return {"PASS": "pass", "BLOCKED": "blocked", "FAIL": "fail"}.get(status, "neutral")
+    return {"PASS": "pass", "BLOCKED": "blocked", "FAIL": "fail", "INCONCLUSIVE": "neutral"}.get(status, "neutral")
 
 
 def create_app(database_path: Path) -> FastAPI:
@@ -38,6 +40,45 @@ def create_app(database_path: Path) -> FastAPI:
     @app.get("/api/projects")
     def projects() -> dict[str, object]:
         return {"projects": store.projects()}
+
+    @app.get("/api/plans")
+    def plans() -> dict[str, object]:
+        return {"plans": RunStore(database_path).list_plans()}
+
+    @app.post("/api/plans")
+    def create_plan(payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
+        project_id = str(payload.get("project_id") or "")
+        cases = payload.get("cases")
+        if not project_id or not isinstance(cases, list) or not cases:
+            raise HTTPException(status_code=400, detail="project_id and at least one test case are required")
+        name = str(payload.get("name") or "Untitled plan")
+        environment = str(payload.get("environment") or "local")
+        plan = RunStore(database_path).create_plan(project_id, cases, environment=environment, name=name)
+        return plan.model_dump()
+
+    @app.get("/api/plans/{plan_id}")
+    def plan_status(plan_id: str) -> dict[str, object]:
+        try:
+            return RunStore(database_path).get_plan(plan_id).model_dump()
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/api/plans/{plan_id}/approve")
+    def approve_plan(plan_id: str) -> dict[str, object]:
+        try:
+            runs = RunStore(database_path)
+            runs.approve(plan_id)
+            return runs.get_plan(plan_id).model_dump()
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/api/plans/{plan_id}/start")
+    def start_plan(plan_id: str, payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
+        base_url = str(payload.get("base_url") or "http://localhost:3000")
+        try:
+            return start_background_run(plan_id, str(database_path), base_url)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
 
     @app.get("/api/runs/{run_id}")
     def run_status(run_id: str) -> dict[str, object]:
@@ -53,6 +94,12 @@ def create_app(database_path: Path) -> FastAPI:
         if not matches:
             raise HTTPException(status_code=404, detail="evidence not found")
         path = Path(matches[0]["artifact_path"])
+        try:
+            path = path.resolve()
+            artifact_root = database_path.expanduser().resolve().parent
+            path.relative_to(artifact_root)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="evidence outside artifact root") from None
         if not path.is_file():
             raise HTTPException(status_code=404, detail="artifact file not found")
         return FileResponse(path)
@@ -61,10 +108,69 @@ def create_app(database_path: Path) -> FastAPI:
     def runs() -> dict[str, object]:
         return {"runs": RunStore(database_path).list_runs()}
 
+    @app.get("/api/findings")
+    def findings() -> dict[str, object]:
+        run_store = RunStore(database_path)
+        items = []
+        for run in run_store.list_runs():
+            for result in run_store.results(run["run_id"]):
+                if result.get("status") != "PASS":
+                    items.append({"finding_id": f"finding_{run['run_id']}_{result.get('test_id', 'unknown')}", "run_id": run["run_id"], "test_id": result.get("test_id"), "status": result.get("status"), "title": result.get("title") or result.get("test_id"), "expected": result.get("expected_result", ""), "actual": result.get("actual_result", ""), "evidence": result.get("evidence_items", [])})
+        return {"findings": items}
+
+    @app.get("/api/runs/{run_id}/events")
+    def run_events(run_id: str, after_id: int = 0) -> dict[str, object]:
+        try:
+            return {"run_id": run_id, "events": RunStore(database_path).events(run_id, after_id=after_id)}
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.get("/api/runs/{run_id}/stream")
+    def run_stream(run_id: str) -> StreamingResponse:
+        def stream():
+            cursor = 0
+            while True:
+                store = RunStore(database_path)
+                try:
+                    run = store.get(run_id)
+                except ValueError:
+                    yield f"event: error\ndata: {json.dumps({'detail': 'run not found'})}\n\n"
+                    return
+                events = store.events(run_id, after_id=cursor)
+                for event in events:
+                    cursor = event["event_id"]
+                    yield f"data: {json.dumps(event)}\n\n"
+                if run.status in {"PASS", "FAIL", "BLOCKED", "INCONCLUSIVE", "CANCELLED"}:
+                    yield f"event: complete\ndata: {json.dumps(run.model_dump())}\n\n"
+                    return
+                time.sleep(0.75)
+
+        return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.post("/api/runs/{run_id}/cancel")
+    def cancel(run_id: str) -> dict[str, object]:
+        try:
+            store = RunStore(database_path)
+            store.request_cancel(run_id)
+            return store.get(run_id).model_dump()
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/api/runs/{run_id}/retry")
+    def retry(run_id: str, payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
+        base_url = str(payload.get("base_url") or "http://localhost:3000")
+        try:
+            run = RunStore(database_path).get(run_id)
+            return start_background_run(run.plan_id, str(database_path), base_url)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard() -> str:
         projects_data = store.projects()
-        runs_data = RunStore(database_path).list_runs()
+        run_store = RunStore(database_path)
+        runs_data = run_store.list_runs()
+        plans_data = run_store.list_plans()
         project_rows = "".join(
             f'''<tr class="data-row" data-search="{_esc(project["project_name"])} {_esc(project["workspace_root"])}">
                 <td><span class="row-index">{index:02d}</span><strong>{_esc(project["project_name"])}</strong></td>
@@ -79,10 +185,19 @@ def create_app(database_path: Path) -> FastAPI:
                 <td><span class="row-index">{index:02d}</span><strong class="mono">{_esc(run["run_id"])}</strong></td>
                 <td><span class="status {_status_class(run["status"])}"><i></i>{_esc(run["status"])}</span></td>
                 <td class="muted">{_esc(run["message"])}</td>
-                <td><a class="row-link" href="/api/runs/{_esc(run["run_id"])}" aria-label="Inspect run">↗</a></td>
+                <td><a class="row-link run-link" href="#monitor" data-run-id="{_esc(run["run_id"])}" aria-label="Monitor run">↗</a></td>
             </tr>'''
             for index, run in enumerate(runs_data, start=1)
         ) or '<tr class="empty-row"><td colspan="4">No runs executed yet.</td></tr>'
+        plan_rows = "".join(
+            f'''<tr class="data-row" data-search="{_esc(plan["name"])} {_esc(plan["plan_id"])} {_esc(plan["environment"])}">
+                <td><span class="row-index">{index:02d}</span><strong>{_esc(plan["name"])}</strong><div class="mono muted">{_esc(plan["plan_id"])}</div></td>
+                <td class="mono">{_esc(plan["environment"])}</td><td class="mono">{plan["case_count"]:02d} cases</td>
+                <td><span class="status {_status_class("PASS" if plan["approved"] else "BLOCKED")}"><i></i>{"APPROVED" if plan["approved"] else "DRAFT"}</span></td>
+                <td><button class="row-action plan-approve" data-plan-id="{_esc(plan["plan_id"])}" {"disabled" if plan["approved"] else ""}>{"Approved" if plan["approved"] else "Approve"}</button><button class="row-action plan-start" data-plan-id="{_esc(plan["plan_id"])}">Start ↗</button></td>
+            </tr>'''
+            for index, plan in enumerate(plans_data, start=1)
+        ) or '<tr class="empty-row"><td colspan="5">No plans drafted yet. Use Test Studio to create the first plan.</td></tr>'
         passed = sum(run["status"] == "PASS" for run in runs_data)
         blocked = sum(run["status"] == "BLOCKED" for run in runs_data)
         return f'''<!doctype html>
@@ -141,25 +256,85 @@ td {{ height:58px; }} td:first-child {{ width:31%; }} .row-index {{ display:inli
 .footer {{ display:grid; grid-template-columns:1fr auto; gap:24px; align-items:center; margin-top:28px; padding:20px 0 4px; border-top:1px solid var(--ink); }}
 .footer h2 {{ margin:0 0 5px; font-size:20px; letter-spacing:-.05em; }} .footer p {{ margin:0; color:var(--muted); }} .actions {{ display:flex; gap:10px; }}
 .action {{ padding:12px 15px; border:1px solid var(--orange); color:var(--ink); text-decoration:none; font-size:10px; text-transform:uppercase; letter-spacing:.08em; }} .action.primary {{ color:#fff; background:var(--orange); }}
+.studio-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }} .form-panel {{ background:var(--paper); border-top:2px solid var(--ink); padding:18px; }} .form-row {{ display:grid; gap:6px; margin-bottom:14px; }} .form-row label {{ text-transform:uppercase; letter-spacing:.12em; font-size:9px; font-weight:700; color:var(--muted); }} .form-row input, .form-row select, .form-row textarea {{ width:100%; border:1px solid var(--line); background:var(--surface); color:var(--ink); padding:10px 11px; font:12px inherit; outline:none; }} .form-row textarea {{ min-height:190px; resize:vertical; font-family:ui-monospace,monospace; font-size:11px; }} .form-row input:focus, .form-row select:focus, .form-row textarea:focus {{ border-color:var(--orange); }} .form-message {{ min-height:18px; margin-top:10px; color:var(--muted); }} .row-action {{ border:1px solid var(--line); background:var(--surface); color:var(--ink); padding:8px 10px; margin-right:6px; font:700 9px inherit; text-transform:uppercase; letter-spacing:.07em; cursor:pointer; }} .row-action:hover {{ border-color:var(--orange); }} .row-action:disabled {{ opacity:.5; cursor:not-allowed; }}
 .kicker {{ display:flex; gap:18px; margin-top:8px; }} .kicker span {{ color:var(--muted); font:10px ui-monospace,monospace; }} .kicker b {{ color:var(--ink); }}
-@media (max-width:850px) {{ .shell {{ padding:0; }} .frame {{ border-width:0; border-radius:0; box-shadow:none; }} .topbar {{ padding:14px 18px; flex-wrap:wrap; gap:15px; }} .brand {{ min-width:auto; }} .nav {{ order:3; flex-basis:100%; overflow:auto; gap:18px; padding-bottom:2px; }} .main {{ padding:20px 18px; }} .hero {{ grid-template-columns:1fr; }} .hero-copy {{ border-right:0; border-bottom:1px solid var(--line); padding-right:0; min-height:240px; }} .hero-panel {{ padding:22px 0 26px; }} .section-head, .footer {{ align-items:flex-start; flex-direction:column; }} .controls {{ width:100%; flex-wrap:wrap; }} .search {{ flex:1; min-width:180px; }} .actions {{ width:100%; }} .action {{ flex:1; text-align:center; }} }}
+@media (max-width:850px) {{ .shell {{ padding:0; }} .frame {{ border-width:0; border-radius:0; box-shadow:none; }} .topbar {{ padding:14px 18px; flex-wrap:wrap; gap:15px; }} .brand {{ min-width:auto; }} .nav {{ order:3; flex-basis:100%; overflow:auto; gap:18px; padding-bottom:2px; }} .main {{ padding:20px 18px; }} .hero {{ grid-template-columns:1fr; }} .hero-copy {{ border-right:0; border-bottom:1px solid var(--line); padding-right:0; min-height:240px; }} .hero-panel {{ padding:22px 0 26px; }} .section-head, .footer {{ align-items:flex-start; flex-direction:column; }} .controls {{ width:100%; flex-wrap:wrap; }} .search {{ flex:1; min-width:180px; }} .actions {{ width:100%; }} .action {{ flex:1; text-align:center; }} .studio-grid {{ grid-template-columns:1fr; }} }}
 @media (prefers-reduced-motion:reduce) {{ * {{ transition:none !important; }} }}
 </style></head>
 <body><div class="shell"><div class="frame">
 <header class="topbar"><div class="brand"><span class="brand-mark"></span><span>HOLOQA / LABS</span></div><nav class="nav"><a class="back" href="#top">← Control surface</a><a href="#projects">Projects</a><a href="#runs">Runs</a><a href="/health">System status</a></nav><a class="apply" href="#runs">New inspection</a></header>
 <main class="main" id="top">
+<section id="studio"><div class="section-head"><div><div class="eyebrow">Authoring / 02</div><h2 class="section-title">Test studio <small>↘</small></h2></div><div class="kicker"><span>CASES <b>STRUCTURED</b></span><span>MODE <b>MCP-READY</b></span></div></div><div class="studio-grid"><form class="form-panel" id="plan-form"><div class="form-row"><label for="plan-name">Plan name</label><input id="plan-name" value="Smoke inspection" required></div><div class="form-row"><label for="plan-project">Project</label><select id="plan-project" required>{''.join(f'<option value="{_esc(project["project_id"])}">{_esc(project["project_name"])}</option>' for project in projects_data) or '<option value="">Initialize a project first</option>'}</select></div><div class="form-row"><label for="plan-environment">Environment</label><input id="plan-environment" value="local"></div><div class="form-row"><label for="plan-cases">Test cases / JSON</label><textarea id="plan-cases" spellcheck="false">{'[]'}</textarea></div><button class="action primary" type="submit">Draft plan ↗</button><div class="form-message" id="plan-message" aria-live="polite"></div></form><div class="form-panel"><div class="eyebrow">Authoring contract</div><h3 style="font-size:24px;letter-spacing:-.05em;margin:12px 0 8px">From intent to evidence.</h3><p class="muted" style="line-height:1.55;max-width:420px">Write browser actions and explicit assertions. Every approved plan becomes a versioned execution record with screenshots, DOM, network, and console evidence.</p><div class="kicker" style="margin-top:28px"><span>SUPPORTED <b>OPEN / · TEXT · URL · STATUS</b></span></div></div></div></section>
+<section id="plans"><div class="section-head"><div><div class="eyebrow">Governance / 03</div><h2 class="section-title">Plan approval <small>↘</small></h2></div><div class="kicker"><span>DRAFTS <b>{len(plans_data):02d}</b></span></div></div><div class="table-wrap"><table><thead><tr><th>Plan</th><th>Environment</th><th>Scope</th><th>State</th><th>Action</th></tr></thead><tbody id="plans-body" aria-live="polite">{plan_rows}</tbody></table></div></section>
 <section class="hero"><div class="hero-copy"><div class="eyebrow">MCP-first SIT / UAT operations</div><h1>CONTROL<span>_</span><br>SURFACE</h1><div class="hero-note"><span class="cross">×</span><span>One place to inspect workspaces, approve plans, and preserve evidence from every browser run.</span></div></div><div class="hero-panel"><span class="tag">Live workspace</span><h2>Operational clarity.</h2><p>Structured quality signals for teams shipping agent-built products.</p><div class="statline"><div class="stat"><strong>{len(projects_data):02d}</strong><span>Projects</span></div><div class="stat"><strong>{len(runs_data):02d}</strong><span>Total runs</span></div><div class="stat"><strong>{passed:02d}/{blocked:02d}</strong><span>Pass / held</span></div></div></div></section>
 <section id="projects"><div class="section-head"><div><div class="eyebrow">Directory / 01</div><h2 class="section-title">Projects <small>↘</small></h2></div><div class="controls"><div class="tabs" role="tablist"><button class="tab active" data-filter="projects">All</button><button class="tab" data-filter="projects">Initialized</button></div><input class="search" id="dashboard-search" type="search" placeholder="Search surface…" aria-label="Search projects and runs"></div></div><div class="table-wrap"><table><thead><tr><th>Project</th><th>Workspace</th><th>Initialized</th><th></th></tr></thead><tbody id="projects-body" aria-live="polite">{project_rows}</tbody></table></div></section>
 <section id="runs"><div class="section-head"><div><div class="eyebrow">Execution ledger / 02</div><h2 class="section-title">Recent runs <small>↘</small></h2></div><div class="kicker"><span>PASS <b>{passed:02d}</b></span><span>HELD <b>{blocked:02d}</b></span></div></div><div class="table-wrap"><table><thead><tr><th>Run identifier</th><th>State</th><th>Message</th><th></th></tr></thead><tbody id="runs-body" aria-live="polite">{run_rows}</tbody></table></div></section>
+<section id="monitor"><div class="section-head"><div><div class="eyebrow">Live execution / 03</div><h2 class="section-title">Run monitor <small>↘</small></h2></div><button class="action" id="cancel-run" type="button">Cancel run</button></div><div class="table-wrap" style="padding:18px"><div id="monitor-status" class="mono" aria-live="polite">Select a run to monitor progress and evidence.</div><pre id="monitor-events" class="mono muted" style="white-space:pre-wrap;max-height:360px;overflow:auto"></pre></div></section>
 <footer class="footer"><div><h2>Ready to inspect the next surface?</h2><p>Initialize a workspace or execute an approved plan through the MCP workflow.</p></div><div class="actions"><a class="action" href="#projects">Initialize project</a><a class="action primary" href="#runs">Create run plan ↗</a></div></footer>
 </main></div></div>
 <script>
+const planForm = document.querySelector('#plan-form');
+const planMessage = document.querySelector('#plan-message');
+if (planForm) planForm.addEventListener('submit', async (event) => {{
+  event.preventDefault();
+  planMessage.textContent = 'Validating cases and drafting plan…';
+  try {{
+    const cases = JSON.parse(document.querySelector('#plan-cases').value);
+    const response = await fetch('/api/plans', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{name:document.querySelector('#plan-name').value, project_id:document.querySelector('#plan-project').value, environment:document.querySelector('#plan-environment').value, cases}})}});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Could not create plan');
+    planMessage.textContent = `${{data.plan_id}} drafted. Review and approve it below.`;
+    window.location.hash = 'plans';
+    setTimeout(() => window.location.reload(), 500);
+  }} catch (error) {{ planMessage.textContent = error.message; }}
+}});
+document.querySelectorAll('.plan-approve').forEach(button => button.addEventListener('click', async () => {{
+  const response = await fetch(`/api/plans/${{button.dataset.planId}}/approve`, {{method:'POST'}});
+  if (response.ok) window.location.reload();
+}}));
+document.querySelectorAll('.plan-start').forEach(button => button.addEventListener('click', async () => {{
+  const baseUrl = window.prompt('Target base URL', 'http://localhost:3000');
+  if (!baseUrl) return;
+  const response = await fetch(`/api/plans/${{button.dataset.planId}}/start`, {{method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{base_url:baseUrl}})}});
+  const run = await response.json();
+  if (!response.ok) {{ window.alert(run.detail || 'Could not start run'); return; }}
+  window.location.hash = 'monitor';
+  monitorRun(run.run_id);
+}}));
 const search = document.querySelector('#dashboard-search');
 search.addEventListener('input', () => {{
   const term = search.value.toLowerCase().trim();
   document.querySelectorAll('.data-row').forEach(row => {{ row.hidden = term && !row.dataset.search.toLowerCase().includes(term); }});
 }});
 document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {{ document.querySelectorAll('.tab').forEach(item => item.classList.remove('active')); tab.classList.add('active'); }}));
+let activeRunId = null;
+let activeSource = null;
+const monitorStatus = document.querySelector('#monitor-status');
+const monitorEvents = document.querySelector('#monitor-events');
+const monitorResults = document.createElement('div');
+monitorResults.className = 'form-message';
+monitorEvents.parentElement.appendChild(monitorResults);
+const cancelButton = document.querySelector('#cancel-run');
+function renderRun(run) {{
+  const progress = run.total_cases ? ` ${{run.completed_cases || 0}}/${{run.total_cases}} cases` : '';
+  monitorStatus.textContent = `${{run.run_id}} — ${{run.status}}${{progress}} — ${{run.message || ''}}`;
+  if (run.results) monitorResults.innerHTML = run.results.map(result => `<div style="padding:8px 0;border-top:1px solid var(--line)"><span class="status ${{result.status === 'PASS' ? 'pass' : result.status === 'BLOCKED' ? 'blocked' : 'fail'}}"><i></i>${{result.status}}</span> <span class="mono">${{result.test_id || ''}}</span> <span class="muted">${{result.actual_result || ''}}</span></div>`).join('');
+}}
+async function monitorRun(runId) {{
+  activeRunId = runId;
+  if (activeSource) activeSource.close();
+  const run = await fetch(`/api/runs/${{runId}}`).then(response => response.json());
+  renderRun(run);
+  monitorEvents.textContent = '';
+  const events = await fetch(`/api/runs/${{runId}}/events`).then(response => response.json());
+  events.events.forEach(event => {{ monitorEvents.textContent += `[${{event.created_at}}] ${{event.event_type}} ${{event.test_id || ''}} ${{event.step || ''}} ${{event.message || ''}}\\n`; }});
+  activeSource = new EventSource(`/api/runs/${{runId}}/stream`);
+  activeSource.onmessage = event => {{ const item = JSON.parse(event.data); monitorEvents.textContent += `[${{item.created_at}}] ${{item.event_type}} ${{item.test_id || ''}} ${{item.step || ''}} ${{item.message || ''}}\\n`; fetch(`/api/runs/${{runId}}`).then(response => response.json()).then(renderRun); }};
+  activeSource.addEventListener('complete', event => {{ renderRun(JSON.parse(event.data)); activeSource.close(); }});
+}}
+document.querySelectorAll('.run-link').forEach(link => link.addEventListener('click', () => monitorRun(link.dataset.runId)));
+cancelButton.addEventListener('click', async () => {{ if (activeRunId) {{ const response = await fetch(`/api/runs/${{activeRunId}}/cancel`, {{method:'POST'}}); renderRun(await response.json()); }} }});
+setInterval(async () => {{ const response = await fetch('/api/runs'); const data = await response.json(); if (activeRunId) {{ const current = data.runs.find(item => item.run_id === activeRunId); if (current) renderRun(current); }} }}, 2000);
 </script></body></html>'''
 
     return app

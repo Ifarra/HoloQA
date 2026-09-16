@@ -24,6 +24,8 @@ def test_mcp_workflow_import_plan_approve_execute(tmp_path: Path):
     assert imported["status"] == "validated"
     plan = holoqa_create_run_plan("project-demo", imported["cases"], str(state))
     assert plan["status"] == "awaiting_approval"
+    assert plan["plan_version"]
+    assert plan["environment"] == "local"
 
     blocked = holoqa_execute_run(plan["plan_id"], str(state))
     assert blocked["status"] == "BLOCKED"
@@ -32,4 +34,5 @@ def test_mcp_workflow_import_plan_approve_execute(tmp_path: Path):
     assert approved["status"] == "approved"
     run = holoqa_execute_run(plan["plan_id"], str(state))
     assert run["status"] == "PASS"
+    assert run["execution_mode"] == "simulated"
     assert holoqa_get_run_status(run["run_id"], str(state))["status"] == "PASS"

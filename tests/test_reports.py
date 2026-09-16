@@ -26,3 +26,12 @@ def test_export_report_creates_html_json_and_xlsx(tmp_path: Path):
     assert Path(result["artifacts"]["html"]).is_file()
     workbook = load_workbook(result["artifacts"]["xlsx"])
     assert workbook.active.cell(row=1, column=5).value == "Status"
+
+
+def test_html_report_escapes_result_values(tmp_path: Path):
+    from holoqa.reports import export_html
+
+    path = export_html(tmp_path / "report.html", {"run_id": "run-1"}, [{"test_id": "<script>", "status": "FAIL", "actual_result": "<img src=x>"}])
+    content = path.read_text(encoding="utf-8")
+    assert "&lt;script&gt;" in content
+    assert "&lt;img src=x&gt;" in content

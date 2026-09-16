@@ -8,7 +8,7 @@ services:
       HOLOQA_STATE: /data/.holoqa/state.db
     volumes:
       - holoqa-data:/data
-      - ./workspace:/workspace
+      - ./:/workspace
 
 volumes:
   holoqa-data:

@@ -6,3 +6,6 @@ __pycache__/
 .coverage
 htmlcov/
 artifacts/
+.holoqa/
+.codebase-memory/
+temp/

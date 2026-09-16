@@ -8,6 +8,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from holoqa.codegraph import discover_snapshot
+
 
 class ProjectInitialization(BaseModel):
     project_id: str
@@ -15,6 +17,9 @@ class ProjectInitialization(BaseModel):
     workspace_root: str
     commit: str
     project_name: str
+    codegraph_status: str = "unavailable"
+    codegraph_artifact: str | None = None
+    codegraph_sha256: str | None = None
 
 
 class ProjectStore:
@@ -39,6 +44,10 @@ class ProjectStore:
                 );
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(snapshots)")}
+            for name, definition in (("codegraph_status", "TEXT"), ("codegraph_artifact", "TEXT"), ("codegraph_sha256", "TEXT")):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE snapshots ADD COLUMN {name} {definition}")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
@@ -66,6 +75,7 @@ class ProjectStore:
         project_id = f"project_{uuid.uuid5(uuid.NAMESPACE_URL, str(workspace)).hex[:16]}"
         snapshot_id = f"snapshot_{uuid.uuid4().hex[:16]}"
         commit = self._commit(workspace)
+        graph = discover_snapshot(workspace, commit)
         project_name = workspace.name or "HoloQA Project"
         with self._connect() as connection:
             connection.execute(
@@ -73,8 +83,8 @@ class ProjectStore:
                 (project_id, str(workspace), project_name),
             )
             connection.execute(
-                "INSERT INTO snapshots(snapshot_id, project_id, commit_sha) VALUES (?, ?, ?)",
-                (snapshot_id, project_id, commit),
+                "INSERT INTO snapshots(snapshot_id, project_id, commit_sha, codegraph_status, codegraph_artifact, codegraph_sha256) VALUES (?, ?, ?, ?, ?, ?)",
+                (snapshot_id, project_id, commit, graph.status, graph.artifact_path, graph.artifact_sha256),
             )
         return ProjectInitialization(
             project_id=project_id,
@@ -82,6 +92,9 @@ class ProjectStore:
             workspace_root=str(workspace),
             commit=commit,
             project_name=project_name,
+            codegraph_status=graph.status,
+            codegraph_artifact=graph.artifact_path,
+            codegraph_sha256=graph.artifact_sha256,
         )
 
     def projects(self) -> list[dict[str, str]]:
