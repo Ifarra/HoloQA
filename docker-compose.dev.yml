@@ -13,7 +13,7 @@ services:
     volumes:
       - .:/app
       - holoqa-dev-venv:/app/.venv
-      - holoqa-dev-data:/data
+      - holoqa-data:/data
       - ./workspace:/workspace
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
@@ -40,6 +40,25 @@ services:
       timeout: 3s
       retries: 12
 
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web.dev
+    working_dir: /app
+    command: ["npm", "run", "dev", "--", "-H", "0.0.0.0", "-p", "3001"]
+    environment:
+      HOLOQA_API_URL: http://holoqa:8000
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "3001:3001"
+    volumes:
+      - .:/app
+      - holoqa-web-node-modules:/app/node_modules
+      - holoqa-web-next:/app/.next
+    depends_on:
+      holoqa:
+        condition: service_healthy
+
   mcp:
     build:
       context: .
@@ -53,9 +72,11 @@ services:
     volumes:
       - .:/app
       - holoqa-dev-venv:/app/.venv
-      - holoqa-dev-data:/data
+      - holoqa-data:/data
       - ./workspace:/workspace
 
 volumes:
   holoqa-dev-venv:
-  holoqa-dev-data:
+  holoqa-data:
+  holoqa-web-node-modules:
+  holoqa-web-next:

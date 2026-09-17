@@ -1,4 +1,7 @@
-export type Project = { project_id:string; project_name:string; workspace_root:string; created_at:string }
-export type Run = { run_id:string; plan_id:string; status:string; message:string; current_test_id?:string; current_step?:string; completed_cases:number; total_cases:number; results?:Record<string, unknown>[]; evidence?:Record<string, string>[] }
-export type Plan = { plan_id:string; project_id:string; name:string; approved:boolean; environment:string; case_count:number }
+export type Project = { project_id:string; project_name:string; workspace_root:string; created_at:string; commit?:string; codegraph_status?:string }
+export type Run = { run_id:string; plan_id:string; status:string; message:string; current_test_id?:string; current_step?:string; completed_cases:number; total_cases:number; started_at?:string; finished_at?:string; last_heartbeat?:string; control_mode?:'agent'|'human'; results?:Record<string, any>[]; evidence?:Record<string, any>[] }
+export type Plan = { plan_id:string; project_id:string; name:string; approved:boolean; environment:string; case_count:number; snapshot_id?:string; plan_version?:string }
+export type Finding = { finding_id:string; run_id:string; test_id:string; title:string; status:string; severity:string; state:string; expected:string; actual:string; evidence?:Record<string, any>[]; created_at?:string }
+export type Environment = { environment_id:string; project_id:string; name:string; base_url:string; kind:string; browser:string; viewport:string; locale:string; protected:boolean; created_at:string }
+export type Requirement = { requirement_id:string; project_id:string; key:string; title:string; description:string; priority:string; status:string; test_ids:string[] }
 export async function api<T>(path:string, init?:RequestInit):Promise<T> { const response = await fetch(`/api${path}`, { ...init, headers:{'Content-Type':'application/json', ...(init?.headers || {})}, cache:'no-store' }); const data = await response.json(); if (!response.ok) throw new Error(data.detail || 'HoloQA API request failed'); return data }

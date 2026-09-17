@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import subprocess
 import uuid
@@ -39,6 +40,20 @@ class ProjectStore:
                     snapshot_id TEXT PRIMARY KEY,
                     project_id TEXT NOT NULL,
                     commit_sha TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+                );
+                CREATE TABLE IF NOT EXISTS environments (
+                    environment_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
+                    base_url TEXT NOT NULL, kind TEXT DEFAULT 'staging', browser TEXT DEFAULT 'chromium',
+                    viewport TEXT DEFAULT '1440x900', locale TEXT DEFAULT 'en-US', protected INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+                );
+                CREATE TABLE IF NOT EXISTS requirements (
+                    requirement_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, req_key TEXT NOT NULL,
+                    title TEXT NOT NULL, description TEXT DEFAULT '', priority TEXT DEFAULT 'medium',
+                    status TEXT DEFAULT 'uncovered', test_ids TEXT DEFAULT '[]',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(project_id) REFERENCES projects(project_id)
                 );
@@ -103,3 +118,45 @@ class ProjectStore:
                 "SELECT project_id, project_name, workspace_root, created_at FROM projects ORDER BY created_at DESC"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def environments(self, project_id: str | None = None) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            query = "SELECT environment_id, project_id, name, base_url, kind, browser, viewport, locale, protected, created_at FROM environments"
+            args: tuple[object, ...] = ()
+            if project_id:
+                query += " WHERE project_id=?"; args = (project_id,)
+            rows = connection.execute(query + " ORDER BY created_at DESC", args).fetchall()
+        return [{**dict(row), "protected": bool(row[8])} for row in rows]
+
+    def create_environment(self, payload: dict[str, object]) -> dict[str, object]:
+        required = [str(payload.get(key) or "") for key in ("project_id", "name", "base_url")]
+        if not all(required):
+            raise ValueError("project_id, name, and base_url are required")
+        environment_id = f"env_{uuid.uuid4().hex[:12]}"
+        values = (environment_id, required[0], required[1], required[2], str(payload.get("kind") or "staging"), str(payload.get("browser") or "chromium"), str(payload.get("viewport") or "1440x900"), str(payload.get("locale") or "en-US"), int(bool(payload.get("protected"))))
+        with self._connect() as connection:
+            connection.execute("INSERT INTO environments(environment_id, project_id, name, base_url, kind, browser, viewport, locale, protected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", values)
+        return self.environments(required[0])[0]
+
+    def delete_environment(self, environment_id: str) -> None:
+        with self._connect() as connection:
+            if connection.execute("DELETE FROM environments WHERE environment_id=?", (environment_id,)).rowcount == 0:
+                raise ValueError(f"environment not found: {environment_id}")
+
+    def requirements(self, project_id: str | None = None) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            query = "SELECT requirement_id, project_id, req_key, title, description, priority, status, test_ids, created_at FROM requirements"
+            args: tuple[object, ...] = ()
+            if project_id:
+                query += " WHERE project_id=?"; args = (project_id,)
+            rows = connection.execute(query + " ORDER BY created_at DESC", args).fetchall()
+        return [{**dict(row), "key": row[2], "test_ids": json.loads(row[7] or "[]")} for row in rows]
+
+    def create_requirement(self, payload: dict[str, object]) -> dict[str, object]:
+        project_id, title = str(payload.get("project_id") or ""), str(payload.get("title") or "")
+        if not project_id or not title: raise ValueError("project_id and title are required")
+        requirement_id = f"req_{uuid.uuid4().hex[:12]}"
+        key = str(payload.get("key") or f"REQ-{uuid.uuid4().hex[:4].upper()}")
+        with self._connect() as connection:
+            connection.execute("INSERT INTO requirements(requirement_id, project_id, req_key, title, description, priority, status, test_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (requirement_id, project_id, key, title, str(payload.get("description") or ""), str(payload.get("priority") or "medium"), str(payload.get("status") or "uncovered"), json.dumps(payload.get("test_ids") or [])))
+        return self.requirements(project_id)[0]

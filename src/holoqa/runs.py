@@ -34,6 +34,7 @@ class Run(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     last_heartbeat: str | None = None
+    control_mode: str = "agent"
 
 
 class RunStore:
@@ -77,6 +78,8 @@ class RunStore:
             run_columns = {row[1] for row in db.execute("PRAGMA table_info(runs)")}
             if "execution_mode" not in run_columns:
                 db.execute("ALTER TABLE runs ADD COLUMN execution_mode TEXT DEFAULT 'real'")
+            if "control_mode" not in run_columns:
+                db.execute("ALTER TABLE runs ADD COLUMN control_mode TEXT DEFAULT 'agent'")
             for name, definition in (
                 ("current_test_id", "TEXT"),
                 ("current_step", "TEXT"),
@@ -133,6 +136,12 @@ class RunStore:
                 db.execute("UPDATE runs SET current_test_id=?, current_step=?, completed_cases=?, last_heartbeat=? WHERE run_id=?", (test_id, step, completed_cases, now, run_id))
         self._event(run_id, event_type, test_id=test_id, step=step, status=status, message=message, payload=payload)
 
+    def add_evidence(self, run_id: str, test_id: str, artifact_path: str, kind: str) -> None:
+        with sqlite3.connect(self.path) as db:
+            exists = db.execute("SELECT 1 FROM evidence WHERE run_id=? AND artifact_path=?", (run_id, artifact_path)).fetchone()
+            if not exists:
+                db.execute("INSERT INTO evidence VALUES (?, ?, ?, ?, ?)", (f"evidence_{uuid.uuid4().hex[:12]}", run_id, test_id, artifact_path, kind))
+
     def request_cancel(self, run_id: str) -> None:
         with sqlite3.connect(self.path) as db:
             row = db.execute("SELECT status FROM runs WHERE run_id=?", (run_id,)).fetchone()
@@ -147,6 +156,19 @@ class RunStore:
         with sqlite3.connect(self.path) as db:
             row = db.execute("SELECT cancel_requested FROM runs WHERE run_id=?", (run_id,)).fetchone()
         return bool(row and row[0])
+
+    def control_mode(self, run_id: str) -> str:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT control_mode FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        return str(row[0] or "agent") if row else "agent"
+
+    def set_control_mode(self, run_id: str, mode: str) -> None:
+        if mode not in {"agent", "human"}:
+            raise ValueError("control mode must be agent or human")
+        with sqlite3.connect(self.path) as db:
+            if db.execute("UPDATE runs SET control_mode=?, message=?, last_heartbeat=? WHERE run_id=?", (mode, "Human takeover active" if mode == "human" else "Agent control resumed", self._now(), run_id)).rowcount == 0:
+                raise ValueError(f"run not found: {run_id}")
+        self._event(run_id, "control_changed", message="Human takeover active" if mode == "human" else "Agent control resumed", payload={"control_mode": mode})
 
     def events(self, run_id: str, after_id: int = 0) -> list[dict]:
         with sqlite3.connect(self.path) as db:
@@ -196,10 +218,9 @@ class RunStore:
                 for item in items:
                     artifact_path = str(item.get("path", ""))
                     if artifact_path:
-                        db.execute(
-                            "INSERT INTO evidence VALUES (?, ?, ?, ?, ?)",
-                            (f"evidence_{uuid.uuid4().hex[:12]}", run_id, result.get("test_id", ""), artifact_path, str(item.get("kind", "artifact"))),
-                        )
+                        existing = db.execute("SELECT 1 FROM evidence WHERE run_id=? AND artifact_path=?", (run_id, artifact_path)).fetchone()
+                        if not existing:
+                            db.execute("INSERT INTO evidence VALUES (?, ?, ?, ?, ?)", (f"evidence_{uuid.uuid4().hex[:12]}", run_id, result.get("test_id", ""), artifact_path, str(item.get("kind", "artifact"))))
         self._event(run_id, "run_finished", status=status, message=message, payload={"result_count": len(results)})
 
     def results(self, run_id: str) -> list[dict]:
@@ -253,7 +274,7 @@ class RunStore:
 
     def get(self, run_id: str) -> Run:
         with sqlite3.connect(self.path) as db:
-            row = db.execute("SELECT run_id, plan_id, status, message, execution_mode, current_test_id, current_step, completed_cases, total_cases, started_at, finished_at, last_heartbeat FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            row = db.execute("SELECT run_id, plan_id, status, message, execution_mode, current_test_id, current_step, completed_cases, total_cases, started_at, finished_at, last_heartbeat, control_mode FROM runs WHERE run_id=?", (run_id,)).fetchone()
         if not row:
             raise ValueError(f"run not found: {run_id}")
-        return Run(run_id=row[0], plan_id=row[1], status=row[2], message=row[3], execution_mode=row[4] or "real", current_test_id=row[5], current_step=row[6], completed_cases=row[7] or 0, total_cases=row[8] or 0, started_at=row[9], finished_at=row[10], last_heartbeat=row[11])
+        return Run(run_id=row[0], plan_id=row[1], status=row[2], message=row[3], execution_mode=row[4] or "real", current_test_id=row[5], current_step=row[6], completed_cases=row[7] or 0, total_cases=row[8] or 0, started_at=row[9], finished_at=row[10], last_heartbeat=row[11], control_mode=row[12] or "agent")

@@ -27,6 +27,7 @@ def _execute(run_id: str, plan_id: str, database: Path, base_url: str) -> None:
         store.mark_running(run_id)
 
         def on_event(**event: Any) -> None:
+            payload = event.get("payload") or {}
             store.progress(
                 run_id,
                 event_type=event.get("event_type", "run_event"),
@@ -35,8 +36,11 @@ def _execute(run_id: str, plan_id: str, database: Path, base_url: str) -> None:
                 status=event.get("status"),
                 message=event.get("message", ""),
                 completed_cases=event.get("completed_cases"),
-                payload=event.get("payload"),
+                payload=payload,
             )
+            for item in payload.get("evidence_items", []):
+                if item.get("path"):
+                    store.add_evidence(run_id, str(event.get("test_id") or ""), str(item["path"]), str(item.get("kind") or "artifact"))
 
         results = execute_cases(
             plan.cases,
@@ -44,6 +48,7 @@ def _execute(run_id: str, plan_id: str, database: Path, base_url: str) -> None:
             database.parent / "artifacts" / run_id,
             on_event=on_event,
             cancel_check=lambda: store.cancellation_requested(run_id),
+            control_check=lambda: store.control_mode(run_id) == "human",
         )
         status = "PASS" if results and all(result["status"] == "PASS" for result in results) else "FAIL"
         store.complete(run_id, status, f"Executed {len(results)} test case(s)", results)
@@ -56,4 +61,10 @@ def _execute(run_id: str, plan_id: str, database: Path, base_url: str) -> None:
 def cancel_run(run_id: str, state_database: str) -> dict[str, Any]:
     store = RunStore(Path(state_database))
     store.request_cancel(run_id)
+    return store.get(run_id).model_dump()
+
+
+def set_control_mode(run_id: str, state_database: str, mode: str) -> dict[str, Any]:
+    store = RunStore(Path(state_database))
+    store.set_control_mode(run_id, mode)
     return store.get(run_id).model_dump()

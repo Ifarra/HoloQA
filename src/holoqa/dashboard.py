@@ -16,7 +16,7 @@ def default_database_path() -> Path:
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
-from holoqa.execution_service import start_background_run
+from holoqa.execution_service import set_control_mode, start_background_run
 from holoqa.project_store import ProjectStore
 from holoqa.runs import RunStore
 
@@ -48,6 +48,36 @@ def create_app(database_path: Path) -> FastAPI:
             raise HTTPException(status_code=400, detail="workspace_root is required")
         try:
             return store.initialize(Path(workspace_root)).model_dump()
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/api/environments")
+    def environments(project_id: str | None = None) -> dict[str, object]:
+        return {"environments": store.environments(project_id)}
+
+    @app.post("/api/environments")
+    def create_environment(payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
+        try:
+            return store.create_environment(payload)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.delete("/api/environments/{environment_id}")
+    def delete_environment(environment_id: str) -> dict[str, str]:
+        try:
+            store.delete_environment(environment_id)
+            return {"status": "deleted"}
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.get("/api/requirements")
+    def requirements(project_id: str | None = None) -> dict[str, object]:
+        return {"requirements": store.requirements(project_id)}
+
+    @app.post("/api/requirements")
+    def create_requirement(payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
+        try:
+            return store.create_requirement(payload)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -118,6 +148,23 @@ def create_app(database_path: Path) -> FastAPI:
     def runs() -> dict[str, object]:
         return {"runs": RunStore(database_path).list_runs()}
 
+    @app.get("/api/run-comparison")
+    def compare_runs(before: str, after: str) -> dict[str, object]:
+        runs = RunStore(database_path)
+        try:
+            before_run, after_run = runs.get(before), runs.get(after)
+            before_results = {str(item.get("test_id")): item for item in runs.results(before)}
+            after_results = {str(item.get("test_id")): item for item in runs.results(after)}
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        test_ids = sorted(set(before_results) | set(after_results))
+        changes = []
+        for test_id in test_ids:
+            old, new = before_results.get(test_id, {}), after_results.get(test_id, {})
+            if old.get("status") != new.get("status"):
+                changes.append({"test_id": test_id, "before": old.get("status", "MISSING"), "after": new.get("status", "MISSING")})
+        return {"before": before_run.model_dump(), "after": after_run.model_dump(), "summary": {"resolved": sum(1 for c in changes if c["before"] in {"FAIL", "BLOCKED"} and c["after"] == "PASS"), "regressions": sum(1 for c in changes if c["before"] == "PASS" and c["after"] in {"FAIL", "BLOCKED"}), "changed": len(changes)}, "changes": changes}
+
     @app.get("/api/findings")
     def findings() -> dict[str, object]:
         run_store = RunStore(database_path)
@@ -187,6 +234,13 @@ def create_app(database_path: Path) -> FastAPI:
             return store.get(run_id).model_dump()
         except ValueError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/api/runs/{run_id}/control")
+    def control(run_id: str, payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
+        try:
+            return set_control_mode(run_id, str(database_path), str(payload.get("mode") or "human"))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.post("/api/runs/{run_id}/retry")
     def retry(run_id: str, payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:

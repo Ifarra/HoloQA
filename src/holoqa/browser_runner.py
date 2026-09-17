@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +66,7 @@ def _evaluate_expected(expected: str, page: Any, responses: list[dict[str, Any]]
     return ("PASS" if passed else "FAIL", observed_text[:1000])
 
 
-def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path, on_event: Any | None = None, cancel_check: Any | None = None) -> list[dict[str, Any]]:
+def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path, on_event: Any | None = None, cancel_check: Any | None = None, control_check: Any | None = None) -> list[dict[str, Any]]:
     """Execute the documented demo workflow and preserve step-level evidence."""
     from playwright.sync_api import sync_playwright
 
@@ -75,11 +76,16 @@ def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         for case in cases:
+            while control_check and control_check():
+                emit(event_type="human_takeover", test_id=case["test_id"], message="Waiting for human control to be released")
+                time.sleep(0.35)
             if cancel_check and cancel_check():
                 raise CancelledBrowserRun("Run cancelled before the next test case")
             case_dir = artifact_dir / case["test_id"]
             case_dir.mkdir(parents=True, exist_ok=True)
-            page = browser.new_page()
+            context = browser.new_context()
+            context.tracing.start(screenshots=True, snapshots=True, sources=True)
+            page = context.new_page()
             evidence: list[str] = []
             step_results: list[dict[str, Any]] = []
             responses: list[dict[str, Any]] = []
@@ -93,10 +99,15 @@ def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path
                 _dismiss_overlays(page)
                 evidence.append(str(case_dir / "initial.png"))
                 page.screenshot(path=evidence[-1], full_page=True)
-                for step in case.get("steps", []):
+                for step_index, step in enumerate(case.get("steps", [])):
+                    while control_check and control_check():
+                        emit(event_type="human_takeover", test_id=case["test_id"], step=step, message="Agent paused while human controls the browser")
+                        time.sleep(0.35)
                     if cancel_check and cancel_check():
                         raise CancelledBrowserRun(f"Run cancelled during {case['test_id']}")
-                    emit(event_type="step_started", test_id=case["test_id"], step=step, message="Executing browser step")
+                    live_path = case_dir / f"step-{step_index + 1:02d}.png"
+                    page.screenshot(path=live_path, full_page=True)
+                    emit(event_type="step_started", test_id=case["test_id"], step=step, message="Executing browser step", payload={"action_type": "browser_step", "reason": "Following the approved test plan", "evidence_items": [{"path": str(live_path), "kind": "screenshot"}]})
                     step_lower = step.lower().strip()
                     before = len(responses)
                     navigation = re.search(r"(?:open|navigate)(?:\s+to)?\s+(https?://\S+|/\S*)", step, flags=re.IGNORECASE)
@@ -109,6 +120,34 @@ def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path
                         _dismiss_overlays(page)
                         step_results.append({"step": step, "status": "PASS", "actual_result": f"Navigated to {page.url}"})
                         emit(event_type="step_finished", test_id=case["test_id"], step=step, status="PASS", message=f"Navigated to {page.url}")
+                        continue
+                    fill = re.search(r"fill\s+(?:the\s+)?(.+?)\s+(?:with|=)\s+[\"']?(.+?)[\"']?$", step, flags=re.IGNORECASE)
+                    if fill:
+                        label, value = fill.group(1).strip(), fill.group(2).strip()
+                        page.get_by_label(label, exact=False).fill(value)
+                        step_results.append({"step": step, "status": "PASS", "actual_result": f"Filled {label}"})
+                        emit(event_type="step_finished", test_id=case["test_id"], step=step, status="PASS", message=f"Filled {label}")
+                        continue
+                    click = re.search(r"click\s+(?:the\s+)?[\"']?(.+?)[\"']?$", step, flags=re.IGNORECASE)
+                    if click and "create user" not in step_lower:
+                        target = click.group(1).strip()
+                        locator = page.get_by_role("button", name=target, exact=False)
+                        if not locator.count():
+                            locator = page.get_by_text(target, exact=False)
+                        if not locator.count():
+                            raise BlockedBrowserStep(f"target not found: {target}")
+                        locator.first.click(timeout=1000)
+                        page.wait_for_timeout(100)
+                        step_results.append({"step": step, "status": "PASS", "actual_result": f"Clicked {target}"})
+                        emit(event_type="step_finished", test_id=case["test_id"], step=step, status="PASS", message=f"Clicked {target}")
+                        continue
+                    if step_lower.startswith("assert text") or step_lower.startswith("assert url") or step_lower.startswith("assert status"):
+                        assertion = step.split(" ", 2)[-1]
+                        verdict, actual = _evaluate_expected(f"PASS_IF {assertion}", page, responses)
+                        step_results.append({"step": step, "status": verdict, "actual_result": actual})
+                        emit(event_type="step_finished", test_id=case["test_id"], step=step, status=verdict, message=actual)
+                        if verdict != "PASS":
+                            raise AssertionError(actual)
                         continue
                     match = re.search(r"(?:create|submit)\s+(?:user\s+)?(.+)", step, flags=re.IGNORECASE)
                     if match and "open" not in step_lower and "navigate" not in step_lower and ("user" in step_lower or step_lower.startswith("create")):
@@ -149,7 +188,9 @@ def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path
                 console_path.write_text(json.dumps(console_messages, indent=2), encoding="utf-8")
                 dom_path.write_text(page.locator("body").inner_text(), encoding="utf-8")
                 navigation_path.write_text(json.dumps({"url": page.url}, indent=2), encoding="utf-8")
-                evidence.extend(str(path) for path in (network_path, console_path, dom_path, navigation_path))
+                trace_path = case_dir / "trace.zip"
+                context.tracing.stop(path=trace_path)
+                evidence.extend(str(path) for path in (network_path, console_path, dom_path, navigation_path, trace_path))
                 expected = str(case.get("expected_result", ""))
                 verdict, actual_result = _evaluate_expected(expected, page, responses)
                 if any(response["status"] >= 500 for response in responses):
@@ -159,7 +200,7 @@ def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path
                     "status": verdict,
                     "actual_result": actual_result,
                     "evidence": ";".join(evidence),
-                    "evidence_items": [{"path": path, "kind": kind} for path, kind in zip(evidence, ["screenshot", "screenshot", "network", "console", "dom", "navigation"])],
+                    "evidence_items": [{"path": path, "kind": kind} for path, kind in zip(evidence, ["screenshot", "screenshot", "network", "console", "dom", "navigation", "trace"])],
                     "steps": step_results,
                     "network": responses,
                     "console": console_messages,
@@ -170,11 +211,19 @@ def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path
             except Exception as error:
                 failure = case_dir / "failure.png"
                 page.screenshot(path=failure, full_page=True)
+                try:
+                    context.tracing.stop(path=case_dir / "trace.zip")
+                except Exception:
+                    pass
                 status = "BLOCKED" if isinstance(error, BlockedBrowserStep) else "FAIL"
-                result = {"test_id": case["test_id"], "status": status, "actual_result": f"{status}: {error}", "evidence": str(failure), "steps": step_results, "network": responses, "console": console_messages}
+                error_evidence = [{"path": str(failure), "kind": "screenshot"}]
+                if (case_dir / "trace.zip").is_file():
+                    error_evidence.append({"path": str(case_dir / "trace.zip"), "kind": "trace"})
+                result = {"test_id": case["test_id"], "status": status, "actual_result": f"{status}: {error}", "evidence": str(failure), "evidence_items": error_evidence, "steps": step_results, "network": responses, "console": console_messages}
                 results.append(result)
                 emit(event_type="case_finished", test_id=case["test_id"], status=status, message=result["actual_result"][:240], completed_cases=len(results), payload={"evidence": result["evidence"]})
             finally:
                 page.close()
+                context.close()
         browser.close()
     return results

@@ -9,3 +9,6 @@ artifacts/
 .holoqa/
 .codebase-memory/
 temp/
+.next/
+node_modules/
+tmp-juice-plans.png
