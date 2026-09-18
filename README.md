@@ -4,48 +4,103 @@ A local MCP server that turns a checked-in test plan into an evidence-backed
 release checklist.
 
 You drive the browser. HoloQA captures the evidence, evaluates the plan, and
-computes the verdict — **you cannot record a pass.** That constraint is the
-product: a filled checklist is only worth something if the thing being tested
-did not also write the results.
+computes the verdict — **you cannot record a pass.**
+
+That constraint is the whole product. A filled checklist is only worth
+something if the thing being tested did not also write the results.
 
 No API key. No server, no Docker, no database, no port. HoloQA never calls a
 model.
 
+---
+
+## Contents
+
+- [Why](#why) · [Install](#install) · [First run](#first-run)
+- [The plan file](#the-plan-file) · [Assertions](#assertions) · [Verdicts](#verdicts)
+- [Worked example](#worked-example) · [MCP tools](#mcp-tools) · [CLI](#cli)
+- [Guardrails](#guardrails) · [Run directory](#run-directory)
+- [Troubleshooting](#troubleshooting) · [Limitations](#limitations)
+
+---
+
+## Why
+
+Most AI-driven testing ends with the agent reporting its own results. The agent
+clicks around, decides it went well, and writes `PASS`. The checklist that comes
+out looks rigorous and certifies nothing, because the only witness is the party
+with an interest in the outcome.
+
+HoloQA moves the two jobs apart:
+
+| Job | Who | Why |
+|---|---|---|
+| Understand intent, drive the UI, explain results | your AI client | needs judgement |
+| Capture evidence, evaluate assertions, decide | HoloQA | must not need judgement |
+
+The agent says *what* to capture. HoloQA performs the capture, hashes the file,
+and derives the verdict from a plan a human wrote. `BLOCKED` is the only verdict
+an agent may assert, and it requires a written cause.
+
+```
+Claude Code / Cursor        the AI. Reads pages, decides what to click,
+        │                   writes notes. You already pay for it.
+        │ MCP (stdio, local, no auth, no network)
+        ▼
+    HoloQA                  no intelligence. Subprocess, hash, match.
+        │                   Never makes a model call.
+        │ subprocess
+        ▼
+  agent-browser             deterministic CLI (Playwright underneath)
+```
+
+---
+
 ## Install
 
-HoloQA is not on PyPI; install it from this repository.
+HoloQA is not on PyPI. Install it from this repository.
 
 ```bash
 uv tool install git+https://github.com/USER/holoqa      # provides `holoqa`
 npm install -g agent-browser                            # the browser driver
 ```
 
-`agent-browser` is a deterministic automation CLI (Playwright underneath). It
-is not an AI agent and needs no API key.
+`agent-browser` is a deterministic automation CLI. It is not an AI agent and
+needs no API key.
 
-Then one entry in your MCP client:
+Add one entry to your MCP client:
 
 ```jsonc
-// ~/.claude.json  or  Cursor MCP settings
+// ~/.claude.json, or Cursor MCP settings
 { "mcpServers": { "holoqa": { "command": "holoqa", "args": [] } } }
 ```
 
-Check the setup before trusting it:
+Check it before trusting it:
 
 ```bash
 holoqa doctor       # is agent-browser present? what MCP entry do I need?
-holoqa selftest     # 18 guardrails, offline, no browser, no network
+holoqa selftest     # 18 guardrail checks, offline, no browser, no network
+```
+
+`doctor` prints the exact JSON to paste, and tells you what is missing:
+
+```
+holoqa           2.0.0
+agent-browser    agent-browser 0.27.0
+
+MCP client entry:
+  { "mcpServers": { "holoqa": { "command": "holoqa", "args": [] } } }
 ```
 
 <details>
-<summary>Without installing (run from a clone)</summary>
+<summary>Running from a clone instead</summary>
 
 ```bash
 git clone https://github.com/USER/holoqa && cd holoqa && uv sync
 uv run holoqa doctor
 ```
 
-MCP entry for a clone — use an absolute path to the repo:
+MCP entry for a clone — absolute path to the repo:
 
 ```jsonc
 { "mcpServers": { "holoqa": {
@@ -55,155 +110,439 @@ MCP entry for a clone — use an absolute path to the repo:
 
 </details>
 
-## First run on your own app
+---
+
+## First run
 
 ```bash
 cd ~/code/your-app
 holoqa init --app your-app --url https://staging.your-app.test
 ```
 
-That writes `holoqa.plan.yaml` with one working step and commented examples.
-Edit it to describe real steps, then:
+That writes `holoqa.plan.yaml` with one working step and commented examples. It
+validates as-is and refuses to overwrite an existing file.
 
 ```bash
 holoqa validate holoqa.plan.yaml
 ```
 
-Then in your AI client: **"run the checklist in holoqa.plan.yaml using holoqa."**
+Then, in your AI client:
+
+> run the checklist in holoqa.plan.yaml using holoqa
 
 Writing the plan is the one part that is yours. It is the contract that decides
-every verdict, which is why a human owns it — and your agent can draft it for
-you by calling `holoqa_plan_validate` with no argument to get the format, then
-exploring the app. Review what it writes; commit it.
+every verdict, which is why a human owns it. Your agent can draft it — it calls
+`holoqa_plan_validate` with no argument to get the format, then explores the
+app — but review what it writes and commit it.
 
-## How a run works
+---
 
-```
-you ──drive the UI with agent-browser──▶ the application
- │
- ├─ holoqa_observe   HoloQA runs the capture and owns the bytes
- ├─ holoqa_judge     HoloQA evaluates the plan against those bytes → PASS / FAIL
- └─ holoqa_block     the one verdict you may assert, and it needs a cause
-```
-
-1. `holoqa_plan_validate` — lint the plan
-2. `holoqa_run_start` — creates `.holoqa/runs/<stamp>-<app>/`
-3. For each step: drive the UI yourself, `holoqa_observe`, then `holoqa_judge`
-4. `holoqa_run_package` — report + evidence + optional XLSX, zipped
-5. `holoqa_run_compare` — what regressed since the last green run
-
-## The plan
+## The plan file
 
 One YAML file per application, committed beside the code. It is the only
-per-app artifact; HoloQA's source is never edited.
+per-app artifact; HoloQA's own source is never edited.
 
 ```yaml
 meta:
   app: shop
-  base_url: ${STAGING_URL}
+  base_url: ${STAGING_URL}        # ${VAR} expands from the environment
+  language: en
+  workbook: ./Checklist.xlsx      # optional: annotate an existing checklist
+
+known_behaviors:                  # quirks that look like bugs but are known
+  - id: KB-001
+    title: search is eventually consistent for a few seconds
+    applies_to: [A2]
+
+stages:
+  - id: A
+    title: Checkout
 
 steps:
-  - id: A3
-    title: Creating an order returns 201 PENDING
-    depends_on: [A2]
+  - id: A1
+    stage: A
+    title: Checkout page loads with a ready cart
     route: /checkout
-    do: Fill the cart, submit the order.
+    do: Open the checkout page.          # instruction for the agent, not code
+    expect:
+      - url_contains: /checkout
+      - text_contains: Checkout
+      - screenshot: required
+
+  - id: A2
+    stage: A
+    title: Placing an order returns 201 PENDING
+    depends_on: [A1]
+    do: Fill the cart and submit.
     expect:
       - api: { method: POST, path: /api/orders, status: 201 }
       - json: { status: PENDING }
       - capture: { order_id: $.id }
-      - screenshot: required
 
-  - id: A4
-    title: The order reads back
-    depends_on: [A3]
+  - id: A3
+    stage: A
+    title: The order reads back as CONFIRMED
+    depends_on: [A2]
     expect:
       - api: { method: GET, path: "/api/orders/{order_id}", status: 200 }
-      - text_contains: Thank you
+      - json: { status: CONFIRMED }
+    blocked_if: the orders service is disabled in this environment
 ```
 
-`capture:` binds a value for later steps. `{order_id}` interpolates into any
-later path, and the loader refuses a plan that references a variable no earlier
-step captures.
+### Fields
 
-> **Quoting:** inside a flow mapping `{ }`, values containing `{braces}` or
-> `[brackets]` must be quoted — `path: "/api/orders/{order_id}"`,
-> `capture: { id: "$.items[0].id" }`. HoloQA says so when you get it wrong.
+| Field | Meaning |
+|---|---|
+| `id` | step identifier, also the key for XLSX row matching |
+| `depends_on` | steps that must PASS first; must appear earlier in the file |
+| `route` / `do` | human-readable context for the agent — never executed |
+| `expect` | the assertions HoloQA evaluates |
+| `blocked_if` | when to call it BLOCKED rather than FAIL |
 
-`examples/wolvesight.plan.yaml` is a real 31-step release checklist ported from
-a different application, including its negative tests and known behaviours.
+### Variables
 
-### Assertions
+`capture:` binds a value from a response body. `{order_id}` then interpolates
+into any later `path`. The loader **refuses a plan** that references a variable
+no earlier step captures — before anything runs.
 
-Deliberately a closed set. HoloQA adjudicates; it is not a browser scripting
+> **Quoting.** Inside a flow mapping `{ }`, values containing `{braces}` or
+> `[brackets]` must be quoted:
+> ```yaml
+> - api: { method: GET, path: "/api/orders/{order_id}", status: 200 }
+> - capture: { finding_id: "$.items[0].id" }
+> ```
+> HoloQA detects this specific mistake and says so.
+
+---
+
+## Assertions
+
+A closed set, deliberately. HoloQA adjudicates; it is not a browser scripting
 language.
 
-| Kind | Checks |
-| --- | --- |
-| `url_contains` / `url_matches` | the captured URL |
-| `text_contains` / `text_not_contains` | captured visible page text |
-| `api` | method + path + status (status may be a list) |
-| `json` | subset or JSONPath match against a captured body |
-| `screenshot: required` | a non-empty image exists |
-| `changed` | two captures, taken apart, differ |
-| `capture` | bind `$.json.path` into the run |
+| Kind | Checks | Needs |
+|---|---|---|
+| `url_contains` | substring of the captured URL | a `dom` capture |
+| `url_matches` | regex against the captured URL | a `dom` capture |
+| `text_contains` | substring of visible page text | a `dom` capture |
+| `text_not_contains` | text that must be absent | a `dom` capture |
+| `api` | `{method, path, status}` — status may be an int or a list | an `api` capture |
+| `json` | subset or JSONPath match against the last body | an `api` capture |
+| `screenshot` | `required` — a non-empty image exists | a `screenshot` capture |
+| `changed` | `dom` or `api` — two captures, taken apart, must differ | two captures |
+| `capture` | `{name: $.json.path}` — binds a value for later steps | an `api` capture |
+
+**Negative tests** use a status list:
+
+```yaml
+- api: { method: POST, path: /api/orders, status: [400, 403, 409] }
+```
+
+**`changed`** proves something actually moved. Two byte-identical captures FAIL;
+one capture is BLOCKED, not PASS. Use it for progress bars, regenerated
+documents, and before/after state.
+
+**`json`** matches a subset, so extra keys are fine:
+
+```yaml
+- json: { status: PENDING }             # passes against {"id":"x","status":"PENDING"}
+- json: { "$.items[0].cvss": 7.5 }      # JSONPath for nested values
+```
 
 Anything inexpressible here is `BLOCKED` with a cause — never a soft pass.
+
+---
 
 ## Verdicts
 
 | Verdict | Meaning | Who decides |
-| --- | --- | --- |
+|---|---|---|
 | `PASS` | every assertion satisfied | HoloQA |
 | `FAIL` | ran, an assertion was violated — the system is wrong | HoloQA |
 | `BLOCKED` | could not run or could not be verified | you, with a cause |
 
-**When torn between passing and blocking, block.** A checklist that is too
-loose is more dangerous than one that is too strict; it exists to hold back a
-release. One failed or blocked step means HOLD.
+How they combine: any assertion **false** → `FAIL`. Otherwise any assertion
+**unevaluable** → `BLOCKED`. Otherwise `PASS`. A definite violation outranks an
+unknown.
+
+**When torn between passing and blocking, block.** A checklist that is too loose
+is more dangerous than one that is too strict; it exists to hold back a release.
+One failed or blocked step means `HOLD`.
+
+`FAIL` means the system is wrong. `BLOCKED` means the test never arrived —
+missing prerequisite, disabled feature flag, environment limit. Keeping them
+apart is what makes the report actionable.
+
+---
+
+## Worked example
+
+Real output, abridged.
+
+```
+$ holoqa validate shop.plan.yaml
+{ "status": "ok", "plan": "shop", "steps": 4, "stages": ["A"] }
+```
+
+The agent opens the page, then asks HoloQA to capture:
+
+```
+>>> holoqa_observe("A1", "screenshot")
+{ "file": "step-a1-screenshot.png", "sha256": "28887cd95416fbf1", "bytes": 7044 }
+
+>>> holoqa_judge("A1")
+verdict: PASS
+  [  ok] url_contains     url is 'http://127.0.0.1:8799/checkout'
+  [  ok] text_contains    found in page text
+  [  ok] screenshot       1 screenshot(s) captured
+```
+
+A capture binds a variable, and the next step consumes it:
+
+```
+>>> holoqa_judge("A2")   -> PASS, captured {'order_id': 'ord_88'}
+>>> holoqa_observe("A3", "api", method="GET", path="/api/orders/{order_id}")
+    url: http://127.0.0.1:8799/api/orders/ord_88        ← interpolated
+```
+
+`changed` refuses to pass on one capture, and refuses again when nothing moved:
+
+```
+one dom capture      [??] needs two dom captures taken apart, found 1
+after clicking Pay   [ok] dom changed between 10:33:49 and 10:33:50
+```
+
+Packaging produces the deliverable:
+
+```
+>>> holoqa_run_package()
+{ "decision": "RELEASE", "counts": {"PASS": 4, "FAIL": 0, "BLOCKED": 0},
+  "archive": ".../out/20260918-1033-shop.zip" }
+```
+
+```markdown
+# Release checklist — shop
+- Run: `20260918-1033-shop`   Tag: `v1.2.0`   Commit: `abc1234`   Tester: `Fauzan`
+
+**4 passed · 0 failed · 0 blocked — decision: RELEASE**
+
+| Step | Title | Verdict | Decided by | Evidence | Note |
+| A2 | Placing an order returns 201 PENDING | PASS | holoqa | `step-a2-api-orders.json` | — |
+
+## Revised verdicts
+- `A4` FAIL → PASS at 2026-09-18T10:33:50Z (was: not found in page text)
+```
+
+`examples/wolvesight.plan.yaml` is a real 31-step release checklist ported from
+a different application, with negative tests, known behaviours, and captured
+variables threading through five stages.
+
+---
+
+## MCP tools
+
+Ten. None accepts a verdict parameter — that absence is enforced by a test.
+
+| Tool | Required | Purpose |
+|---|---|---|
+| `holoqa_plan_validate` | — | lint a plan; **with no path, returns the format reference** |
+| `holoqa_run_start` | `plan_path` | create a run directory |
+| `holoqa_run_status` | — | next step, counts, captured variables |
+| `holoqa_observe` | `step_id`, `kind` | HoloQA captures evidence |
+| `holoqa_judge` | `step_id` | compute the verdict from that evidence |
+| `holoqa_block` | `step_id`, `reason` | the one verdict you may assert |
+| `holoqa_note` | `step_id`, `note` | attach an observation, cite a KB id |
+| `holoqa_kb_add` | `kb_id`, `title` | propose a known behaviour found mid-run |
+| `holoqa_run_package` | — | validate → report → optional XLSX → ZIP |
+| `holoqa_run_compare` | — | diff against the last green run |
+
+### `holoqa_observe(step_id, kind, ...)`
+
+| `kind` | Extra arguments | Captures |
+|---|---|---|
+| `screenshot` | `selector` (optional) | PNG, full page by default |
+| `dom` | — | URL, title, visible text |
+| `api` | `method`, `path`, `body` | in-page fetch, using the browser's session |
+| `sse` | `path`, `seconds` | event count, types, how the stream ended |
+| `download` | `selector` | arms a blob interceptor, clicks, saves the file |
+
+You get a compact summary; the full capture goes to disk. That is deliberate —
+returning whole page snapshots floods the caller's context.
+
+`api` captures run as an **in-page fetch**, so they inherit the browser's own
+session including HttpOnly cookies. There is no cookie to copy and no session
+file to manage.
+
+### `holoqa_kb_add`
+
+Writes a proposal to `out/kb-proposals.yaml` rather than editing your plan.
+HoloQA never edits a plan — plans are human-owned and reviewed.
+
+---
+
+## CLI
+
+```
+holoqa [mcp|selftest|doctor|init|validate|status]
+```
+
+| Command | What |
+|---|---|
+| *(none)* / `mcp` | serve the MCP server over stdio |
+| `doctor` | check `agent-browser`, print the MCP client entry |
+| `init` | scaffold `holoqa.plan.yaml` (`--app`, `--url`, `-o`) |
+| `validate <plan>` | lint a plan, print warnings |
+| `status` | show the active run (`--run-dir`, or `$HOLOQA_RUN_DIR`) |
+| `selftest` | verify every guardrail, offline |
+
+`holoqa selftest` is the descendant of a previous tool's `dry-run.mjs`. It
+proves the guardrails still bite, using only temporary files. If it goes green
+while a guardrail is broken, the checklists this tool produces stop meaning
+anything — so it runs with no staging, no browser, and no network, which means
+it runs in CI.
+
+---
 
 ## Guardrails
 
-Ten rules, all covered by `holoqa selftest`:
+Ten rules, all covered by `holoqa selftest`.
 
-1. `PASS` requires a non-empty evidence file on disk
-2. `FAIL` / `BLOCKED` require a written cause
-3. Verdicts outside the three are rejected
-4. An evidence reference to a missing file is rejected
-5. A changed verdict keeps the superseded one in `revisions`
-6. Credential-bearing headers **and request/response bodies** are redacted
-7. A step with unmet `depends_on` cannot be judged
-8. A known-behaviour citation must reference an id in the plan
-9. An uncaptured assertion yields `BLOCKED`, never `FAIL`
-10. The plan is validated statically before anything runs
+| # | Rule |
+|---|---|
+| 1 | `PASS` requires a non-empty evidence file on disk |
+| 2 | `FAIL` / `BLOCKED` require a written cause |
+| 3 | Verdicts outside the three are rejected |
+| 4 | An evidence reference to a missing file is rejected |
+| 5 | A changed verdict keeps the superseded one in `revisions` |
+| 6 | Credential-bearing headers **and bodies** are redacted |
+| 7 | A step with unmet `depends_on` cannot be judged |
+| 8 | A known-behaviour citation must reference an id in the plan |
+| 9 | An uncaptured assertion yields `BLOCKED`, never `FAIL` |
+| 10 | The plan is validated statically before anything runs |
 
-Rule 6 matters more than it looks: evidence ships in a ZIP, so a captured
-`POST /login` has its password stripped before the file is written.
+Plus the one that is not negotiable: **an agent can only assert `BLOCKED`.**
+
+Rule 6 matters more than it looks. Evidence ships in a ZIP, so a captured
+`POST /login` has its password stripped before the file is written — headers
+alone were not enough. Browsers also refuse to expose `Set-Cookie` to `fetch`,
+so an in-page capture cannot leak a session cookie even before redaction runs.
+
+Rule 5 exists because a release checklist is used to hold back a release, so
+"when and why did this verdict change" is itself under review.
+
+---
 
 ## Run directory
 
 ```
 .holoqa/
   runs/20260918-1430-shop/
-    run.json        verdicts, notes, evidence index, revision trail
-    vars.json       captured bindings
-    evidence/       png and json, each hashed in run.json
-    out/            report.md, checklist.xlsx, <run>.zip
-  history.jsonl     one line per run, for regression comparison
+    run.json        verdicts, notes, evidence index with SHA-256, revisions
+    vars.json       captured bindings: {"order_id": "ord_88"}
+    evidence/
+      step-a1-screenshot.png
+      step-a2-api-orders.json
+    out/
+      report.md
+      checklist.xlsx            if meta.workbook is set
+      20260918-1430-shop.zip    the deliverable
+  history.jsonl     one line per completed run
 ```
 
-Plain files. Inspect with `cat`, diff in git, no migrations.
+Plain files. Inspect with `cat`, diff in git, no database, no migrations.
+
+`history.jsonl` is what `holoqa_run_compare` reads to answer *what regressed
+since the last green run* — plus flaky-step detection once a few runs exist.
+
+### XLSX annotation
+
+If `meta.workbook` is set, packaging copies that workbook and appends
+**Status / Actual Result / Evidence** columns, matching rows by a step-id column
+(`Step ID`, `Test ID`, `ID`, `Langkah`, or `No`). The original is never
+modified.
+
+---
+
+## Troubleshooting
+
+**`agent-browser is not on PATH`**
+Install it: `npm install -g agent-browser`. HoloQA captures evidence through it
+and cannot judge a step without captures. Run `holoqa doctor` to confirm.
+
+**`plan is not valid YAML ... expected ',' or '}'`**
+A value with `{braces}` or `[brackets]` inside a flow mapping needs quotes. The
+error includes the fix.
+
+**`step X uses {name} but no earlier step captures it`**
+A `capture:` must come before the step that interpolates it, and `depends_on`
+must point earlier in the file. Both are checked at load time.
+
+**A step is `BLOCKED` and you expected `FAIL`**
+An assertion could not be evaluated — usually a missing capture. Observe first,
+then judge. This is rule 9 and it is intentional: absence of evidence is not
+evidence of a defect.
+
+**Captures return empty data and nothing errors**
+Check for a `401` warning on the capture summary. Sessions often expire well
+before their cookie does, and the symptom disguises itself as empty results
+rather than an error. Re-authenticate in the browser before treating empty
+responses as a product defect.
+
+**`no active run`**
+Pass `run_dir`, set `HOLOQA_RUN_DIR`, or start a run. With none of those,
+HoloQA picks the newest directory under `.holoqa/runs/`.
+
+**Windows:** `agent-browser` is a `.cmd` shim and is invoked through `cmd /c`.
+JavaScript payloads are base64-encoded so no quoting survives to reach the
+shell. If you shell out to HoloQA from Git Bash, note that MSYS rewrites
+`/api/...` arguments into Windows paths — prefix with `MSYS_NO_PATHCONV=1`.
+
+---
+
+## Limitations
+
+Stated plainly, because a testing tool that overstates itself is worse than
+useless.
+
+- **`sse` and `download` captures are unit-tested only.** The browser
+  end-to-end suite covers `screenshot`, `dom`, and `api` against a real server.
+  The other two need a real app with a stream and a blob export.
+- **No file-content assertions.** You can require a download exists, but not
+  that a PDF has non-empty pages. Steps like that need a human to read the
+  evidence; mark them clearly in the plan.
+- **Plans are per-application and hand-written.** That is a deliberate cost:
+  the spec is what stops the agent grading its own homework.
+- **`text_contains` on a truncated page returns BLOCKED**, not FAIL. Page text
+  is captured up to 20k characters; absence cannot be proven beyond that.
+- **Single local run at a time.** No concurrency, no queue, no shared state.
+
+---
 
 ## Development
 
 ```bash
 uv sync --dev
-uv run pytest -q
-uv run holoqa selftest
-holoqa validate examples/wolvesight.plan.yaml
+uv run pytest -q              # 47 tests
+uv run holoqa selftest        # 18 guardrail checks
+uv run holoqa validate examples/wolvesight.plan.yaml
 ```
 
-The browser end-to-end tests skip automatically when `agent-browser` is absent,
-so the offline suite stays green.
+Browser end-to-end tests skip automatically when `agent-browser` is absent, so
+the offline suite stays green in CI.
 
-See `docs/DESIGN.md` for the architecture and the reasoning behind it.
+```
+src/holoqa/
+  plan.py       load, validate, interpolate bindings
+  run.py        run directory, evidence index, guardrails
+  verdict.py    the assertion evaluator
+  observe.py    agent-browser capture and redaction
+  report.py     markdown, packaging, ZIP
+  workbook.py   optional XLSX annotation
+  history.py    cross-run comparison
+  mcp.py        the ten tools
+  cli.py        init / doctor / validate / status / selftest
+```
+
+`docs/DESIGN.md` covers the architecture, what was deleted from the previous
+server-hosted version and why, and the decisions that changed during
+implementation.

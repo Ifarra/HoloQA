@@ -215,14 +215,19 @@ steps:
     title: unquoted brace
     expect:
       - api: { method: GET, path: /a/{x}, status: 200 }
-""", "must be quoted inside a flow mapping"))
+""", "must be quoted"))
 
         print("\n".join(lines))
         print(f"\n{len(lines)} guardrails verified. No staging, no network, no browser.")
         return 0
     except SelftestFailure as failure:
+        # The failure goes to stdout, after the checks that did pass. stderr is
+        # unbuffered, so reporting there alone put the failure *above* the ok
+        # lines and a `tail` of the output looked green while the run was red.
         print("\n".join(lines))
-        print(f"\nFAILED: {failure}", file=sys.stderr)
+        print(f"\nFAILED: {failure}")
+        sys.stdout.flush()
+        print(f"selftest failed: {failure}", file=sys.stderr)
         return 1
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
@@ -295,7 +300,23 @@ def doctor() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="holoqa", description=__doc__)
+    # Not __doc__: that is RST for developers, and its em-dashes mojibake on a
+    # cp1252 console. Users get plain ASCII.
+    parser = argparse.ArgumentParser(
+        prog="holoqa",
+        description=(
+            "Evidence-backed release checklists. Run with no command to serve "
+            "the MCP server over stdio."
+        ),
+        epilog=(
+            "typical first run:\n"
+            "  holoqa doctor                      check agent-browser and the MCP entry\n"
+            "  holoqa init --app myapp --url URL  scaffold holoqa.plan.yaml\n"
+            "  holoqa validate holoqa.plan.yaml   lint it\n"
+            "then ask your AI client to run the checklist."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--version", action="version", version=f"holoqa {__version__}")
     sub = parser.add_subparsers(dest="command")
 
