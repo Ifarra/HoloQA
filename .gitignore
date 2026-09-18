@@ -5,11 +5,6 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
-artifacts/
 .holoqa/
-.holoqa-e2e-fixture*/
 .codebase-memory/
 temp/
-.next/
-node_modules/
-tmp-juice-plans.png

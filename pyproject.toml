@@ -4,19 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "holoqa"
-version = "0.1.0"
-description = "MCP-first, self-hosted SIT/UAT tooling"
+version = "2.0.0"
+description = "Local MCP referee for evidence-backed release checklists"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "mcp>=1.0.0",
   "pydantic>=2.0.0",
-  "fastapi>=0.115.0",
-  "uvicorn>=0.30.0",
-  "websockets>=13.0",
+  "pyyaml>=6.0",
   "openpyxl>=3.1.0",
-  "python-multipart>=0.0.9",
-  "boto3>=1.35.0",
 ]
 
 [dependency-groups]
@@ -25,9 +21,7 @@ dev = [
 ]
 
 [project.scripts]
-holoqa-mcp = "holoqa.mcp_server:main"
-holoqa-dashboard = "holoqa.dashboard:main"
-holoqa-demo = "holoqa.demo_app:main"
+holoqa = "holoqa.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

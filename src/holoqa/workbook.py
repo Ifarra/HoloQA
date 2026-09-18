@@ -1,3 +1,15 @@
+"""Optional XLSX annotation.
+
+A workbook is a deliverable, not a source of truth. HoloQA never overwrites the
+original: it copies it, appends Status / Actual Result / Evidence columns, and
+writes the copy beside the run.
+
+Rows are matched by a step-id column, so this works for any checklist workbook
+without per-application cell mapping. That is the one thing the prior tool could
+not do — it addressed fixed cells (``C3``-``C8``, rows 12-46) and so was welded
+to a single spreadsheet.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -5,52 +17,63 @@ from typing import Any
 
 from openpyxl import load_workbook
 
+#: Header labels accepted as the step-identifier column, case-insensitive.
+ID_HEADERS = ("step id", "test id", "id", "langkah", "no")
+ADDED = ("Status", "Actual Result", "Evidence")
 
-_REQUIRED = {"test id", "title", "steps", "expected result"}
+
+class WorkbookError(ValueError):
+    pass
 
 
-def import_workbook(path: Path) -> list[dict[str, Any]]:
-    workbook = load_workbook(path, read_only=True, data_only=True)
-    sheet = workbook.active
-    rows = list(sheet.iter_rows(values_only=True))
-    if not rows:
-        raise ValueError("workbook is empty")
-    headers = [str(value or "").strip().lower() for value in rows[0]]
-    missing = _REQUIRED - set(headers)
-    if missing:
-        raise ValueError(f"workbook missing columns: {sorted(missing)}")
-    indexes = {header: headers.index(header) for header in _REQUIRED}
-    cases = []
-    for row in rows[1:]:
-        if not any(value is not None and str(value).strip() for value in row):
-            continue
-        cases.append(
-            {
-                "test_id": str(row[indexes["test id"]] or "").strip(),
-                "title": str(row[indexes["title"]] or "").strip(),
-                "steps": [step.strip() for step in str(row[indexes["steps"]] or "").split(";") if step.strip()],
-                "expected_result": str(row[indexes["expected result"]] or "").strip(),
-            }
+def _headers(sheet) -> list[str]:
+    first = next(sheet.iter_rows(values_only=True), None)
+    if first is None:
+        raise WorkbookError("workbook is empty")
+    return [str(value or "").strip().lower() for value in first]
+
+
+def annotate(source: Path, output: Path, steps: list[dict[str, Any]]) -> Path:
+    """Copy ``source`` and fill in results keyed by step id."""
+    source, output = Path(source), Path(output)
+    if not source.is_file():
+        raise WorkbookError(f"source workbook not found: {source}")
+
+    book = load_workbook(source)
+    sheet = book.active
+    headers = _headers(sheet)
+
+    id_column = next(
+        (headers.index(name) for name in ID_HEADERS if name in headers), None
+    )
+    if id_column is None:
+        raise WorkbookError(
+            "no step-id column found; expected one of: " + ", ".join(ID_HEADERS)
         )
-    return cases
 
+    for label in ADDED:
+        if label.lower() not in headers:
+            sheet.cell(row=1, column=sheet.max_column + 1, value=label)
+            headers.append(label.lower())
 
-def export_results(source: Path, output: Path, results: list[dict[str, Any]]) -> None:
-    workbook = load_workbook(source)
-    sheet = workbook.active
-    headers = [str(value or "").strip().lower() for value in next(sheet.iter_rows(values_only=True))]
-    additions = ["Status", "Actual Result", "Evidence"]
-    for header in additions:
-        if header.lower() not in headers:
-            sheet.cell(row=1, column=sheet.max_column + 1, value=header)
-            headers.append(header.lower())
-    by_id = {str(result["test_id"]): result for result in results}
+    by_id = {str(step["id"]): step for step in steps}
+    written = 0
     for row in range(2, sheet.max_row + 1):
-        test_id = str(sheet.cell(row=row, column=headers.index("test id") + 1).value or "")
-        result = by_id.get(test_id)
-        if not result:
+        key = str(sheet.cell(row=row, column=id_column + 1).value or "").strip()
+        step = by_id.get(key)
+        if not step:
             continue
-        for header, key in (("status", "status"), ("actual result", "actual_result"), ("evidence", "evidence")):
-            sheet.cell(row=row, column=headers.index(header) + 1, value=result.get(key, ""))
+        evidence = "; ".join(item["file"] for item in step.get("observations", []))
+        sheet.cell(row=row, column=headers.index("status") + 1, value=step.get("verdict") or "")
+        sheet.cell(row=row, column=headers.index("actual result") + 1, value=step.get("note") or "")
+        sheet.cell(row=row, column=headers.index("evidence") + 1, value=evidence)
+        written += 1
+
     output.parent.mkdir(parents=True, exist_ok=True)
-    workbook.save(output)
+    book.save(output)
+    if written == 0:
+        raise WorkbookError(
+            "no workbook row matched a step id; check that the id column values "
+            "match the step ids in the plan"
+        )
+    return output

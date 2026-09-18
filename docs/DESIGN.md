@@ -187,8 +187,13 @@ New:
 7. A step whose `depends_on` is unsatisfied cannot be judged.
 8. A KB citation must reference a KB id that exists in the plan.
 9. An assertion referencing an uncaptured observation yields `BLOCKED`, not `FAIL`.
-10. `holoqa selftest` exercises every guardrail against fixtures — the role
-    `dry-run.mjs` plays today, and it must stay runnable with no staging.
+10. The plan is validated statically — unknown assertion kinds, dependencies on
+    later steps, and references to variables no earlier step captures are all
+    refused before a run starts.
+
+`holoqa selftest` exercises all ten against fixtures — the role `dry-run.mjs`
+plays today — and must stay runnable with no staging, no browser, and no
+network.
 
 ## Modules
 
@@ -210,8 +215,6 @@ no fastapi, no uvicorn, no websockets.
 
 | From | To | Why |
 | --- | --- | --- |
-| `browser_runner.py::_evaluate_expected` | `verdict.py` | the `PASS_IF` DSL already works; it was dead only because the worker around it was deleted |
-| `checklist.py` XLSX XML surgery | `report.py` | preserves styles, merges, dropdowns, formulas; an `openpyxl` round-trip destroys them |
 | `record.mjs` guardrails | `run.py` | six rules, proven in production |
 | `lib/common.mjs::redactHeaders` | `observe.py` | the regex is right |
 | `session.mjs` expiry detection | `observe.py` | the 80-minute backend token inside a 24-hour cookie degrades silently into empty data — it must stay a first-class hazard |
@@ -219,6 +222,34 @@ no fastapi, no uvicorn, no websockets.
 **Windows note:** `agent-browser` is a `.cmd` shim; since Node 20 it needs a
 shell, and `runAgentBrowser` guards arguments containing `"` or `%`. Python's
 `subprocess` hits the same wall. Port the guard, do not rediscover it.
+
+## Changed during implementation
+
+Four decisions moved once the code met reality. Recorded here so the document
+does not describe a system that was never built.
+
+**No `holoqa_act` tool.** The open question was whether HoloQA had to perform UI
+actions to work around Radix components ignoring plain clicks. Tested against
+the prior tool's own `fixtures/ui-sandbox.html`: a JavaScript `.click()` leaves
+the menu closed, while `agent-browser click` opens it. agent-browser 0.27.0
+dispatches real pointer events, so `ui.mjs` is obsolete and actions stay with
+the agent. The trust boundary only ever needed to cover observation.
+
+**API captures run in-page.** The prior tool used an out-of-band `fetch` with a
+manually copied cookie. Running the fetch inside the page inherits the browser's
+own session, including HttpOnly cookies, which deletes the whole session-planting
+subsystem. Session expiry survives as a 401 warning on the capture summary.
+
+**No XLSX XML surgery.** Cell-level surgery preserved styles but welded the tool
+to one spreadsheet layout — exactly the limit being removed. `workbook.py`
+instead matches rows by a step-id column and appends three columns, which works
+on any checklist workbook. The original is copied, never modified.
+
+**Redaction extended to bodies.** The end-to-end test showed headers alone were
+not enough: a captured `POST /login` wrote its password into evidence that ships
+in a ZIP. `redact_payload` and `redact_text` now walk request and response
+bodies too. Separately, browsers refuse to expose `Set-Cookie` to `fetch` at
+all, so an in-page capture cannot leak it even before redaction runs.
 
 ## Deleted
 

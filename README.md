@@ -1,111 +1,164 @@
 # HoloQA
 
-HoloQA is an MCP-first, self-hosted system integration and user acceptance testing harness. The connected AI coder owns browser execution through local `agent-browser`; HoloQA stores intent, run state, events, evidence, and reports.
+A local MCP server that turns a checked-in test plan into an evidence-backed
+release checklist.
 
-## Docker MVP
+You drive the browser. HoloQA captures the evidence, evaluates the plan, and
+computes the verdict — **you cannot record a pass.** That constraint is the
+product: a filled checklist is only worth something if the thing being tested
+did not also write the results.
 
-The Docker Compose setup starts both the HoloQA dashboard and a repeatable demo application used for real browser SIT validation:
+No API key. No server, no Docker, no database, no port. HoloQA never calls a
+model.
 
-```bash
-docker compose up --build -d
-```
-
-Open:
-
-- Dashboard: http://localhost:8000
-- Remote MCP: http://localhost:8100/mcp
-- Demo application: http://localhost:8765/demo
-- Health: http://localhost:8000/health
-
-Stop it with `docker compose down`. Add `-v` to remove persistent state and artifacts.
-
-The server image does not include a browser runtime. State and generated artifacts are persisted in the `holoqa-data` volume. Mount a repository/workspace into `/workspace` when using the containerized MCP process.
-
-## Development Compose
-
-Use the development stack while changing Python or dashboard code. It bind-mounts the repository into the containers and runs Uvicorn with reload enabled, so source changes do not require an image rebuild:
+## Install
 
 ```bash
-docker compose -f docker-compose.dev.yml up
+uv tool install holoqa          # or: uvx holoqa
+npm install -g agent-browser    # the browser driver (deterministic, no AI)
 ```
 
-Open the same dashboard and demo URLs. Run the MCP service separately when an MCP client needs it:
+Then one entry in your MCP client:
 
-For a remote Streamable HTTP MCP connection in the development stack, start the `mcp-http` service and use `http://localhost:8100/mcp` (or replace `localhost` with the Docker host):
+```jsonc
+// ~/.claude.json  or  Cursor MCP settings
+{ "mcpServers": { "holoqa": { "command": "uvx", "args": ["holoqa"] } } }
+```
+
+Verify it before trusting it:
 
 ```bash
-docker compose -f docker-compose.dev.yml up mcp-http
+holoqa selftest     # 18 guardrails, offline, no browser
 ```
 
-The first development start creates a named `.venv` volume and may install dependencies. After changing `pyproject.toml` or `uv.lock`, refresh that environment with:
+## How a run works
 
-```bash
-docker compose -f docker-compose.dev.yml run --rm holoqa uv sync --dev
+```
+you ──drive the UI with agent-browser──▶ the application
+ │
+ ├─ holoqa_observe   HoloQA runs the capture and owns the bytes
+ ├─ holoqa_judge     HoloQA evaluates the plan against those bytes → PASS / FAIL
+ └─ holoqa_block     the one verdict you may assert, and it needs a cause
 ```
 
-If the dependency environment becomes stale, remove only the development volumes and start again:
+1. `holoqa_plan_validate` — lint the plan
+2. `holoqa_run_start` — creates `.holoqa/runs/<stamp>-<app>/`
+3. For each step: drive the UI yourself, `holoqa_observe`, then `holoqa_judge`
+4. `holoqa_run_package` — report + evidence + optional XLSX, zipped
+5. `holoqa_run_compare` — what regressed since the last green run
 
-```bash
-docker compose -f docker-compose.dev.yml down -v
-docker compose -f docker-compose.dev.yml up
+## The plan
+
+One YAML file per application, committed beside the code. It is the only
+per-app artifact; HoloQA's source is never edited.
+
+```yaml
+meta:
+  app: shop
+  base_url: ${STAGING_URL}
+
+steps:
+  - id: A3
+    title: Creating an order returns 201 PENDING
+    depends_on: [A2]
+    route: /checkout
+    do: Fill the cart, submit the order.
+    expect:
+      - api: { method: POST, path: /api/orders, status: 201 }
+      - json: { status: PENDING }
+      - capture: { order_id: $.id }
+      - screenshot: required
+
+  - id: A4
+    title: The order reads back
+    depends_on: [A3]
+    expect:
+      - api: { method: GET, path: "/api/orders/{order_id}", status: 200 }
+      - text_contains: Thank you
 ```
 
-## MCP client
+`capture:` binds a value for later steps. `{order_id}` interpolates into any
+later path, and the loader refuses a plan that references a variable no earlier
+step captures.
 
-HoloQA supports remote Streamable HTTP MCP only. Start the Compose stack and configure Cursor, Claude Code, or another AI coding client with:
+> **Quoting:** inside a flow mapping `{ }`, values containing `{braces}` or
+> `[brackets]` must be quoted — `path: "/api/orders/{order_id}"`,
+> `capture: { id: "$.items[0].id" }`. HoloQA says so when you get it wrong.
 
-```text
-http://<docker-server-host>:8100/mcp
+`examples/wolvesight.plan.yaml` is a real 31-step release checklist ported from
+a different application, including its negative tests and known behaviours.
+
+### Assertions
+
+Deliberately a closed set. HoloQA adjudicates; it is not a browser scripting
+language.
+
+| Kind | Checks |
+| --- | --- |
+| `url_contains` / `url_matches` | the captured URL |
+| `text_contains` / `text_not_contains` | captured visible page text |
+| `api` | method + path + status (status may be a list) |
+| `json` | subset or JSONPath match against a captured body |
+| `screenshot: required` | a non-empty image exists |
+| `changed` | two captures, taken apart, differ |
+| `capture` | bind `$.json.path` into the run |
+
+Anything inexpressible here is `BLOCKED` with a cause — never a soft pass.
+
+## Verdicts
+
+| Verdict | Meaning | Who decides |
+| --- | --- | --- |
+| `PASS` | every assertion satisfied | HoloQA |
+| `FAIL` | ran, an assertion was violated — the system is wrong | HoloQA |
+| `BLOCKED` | could not run or could not be verified | you, with a cause |
+
+**When torn between passing and blocking, block.** A checklist that is too
+loose is more dangerous than one that is too strict; it exists to hold back a
+release. One failed or blocked step means HOLD.
+
+## Guardrails
+
+Ten rules, all covered by `holoqa selftest`:
+
+1. `PASS` requires a non-empty evidence file on disk
+2. `FAIL` / `BLOCKED` require a written cause
+3. Verdicts outside the three are rejected
+4. An evidence reference to a missing file is rejected
+5. A changed verdict keeps the superseded one in `revisions`
+6. Credential-bearing headers **and request/response bodies** are redacted
+7. A step with unmet `depends_on` cannot be judged
+8. A known-behaviour citation must reference an id in the plan
+9. An uncaptured assertion yields `BLOCKED`, never `FAIL`
+10. The plan is validated statically before anything runs
+
+Rule 6 matters more than it looks: evidence ships in a ZIP, so a captured
+`POST /login` has its password stripped before the file is written.
+
+## Run directory
+
+```
+.holoqa/
+  runs/20260918-1430-shop/
+    run.json        verdicts, notes, evidence index, revision trail
+    vars.json       captured bindings
+    evidence/       png and json, each hashed in run.json
+    out/            report.md, checklist.xlsx, <run>.zip
+  history.jsonl     one line per run, for regression comparison
 ```
 
-The application under test must be mounted on the Docker host beneath `./workspace`, which is exposed to the MCP container as `/workspace`. The dashboard and MCP server use the same `/data/.holoqa/state.db`; tools do not accept client-provided database paths.
-
-Artifacts are stored in the bundled Garage S3-compatible object store under the `holoqa-artifacts` bucket. Garage persists its metadata and objects in the `garage-meta` and `garage-data` Docker volumes. Set `HOLOQA_S3_ACCESS_KEY_ID` and `HOLOQA_S3_SECRET_ACCESS_KEY` in the deployment environment; the Compose defaults are for development only.
-
-Available tools:
-
-- `holoqa_project_inspect`
-- `holoqa_initialize_project`
-- `holoqa_import_test_workbook`
-- `holoqa_create_run_plan`
-- `holoqa_approve_run`
-- `holoqa_open_run_session`
-- `holoqa_agent_heartbeat`
-- `holoqa_record_agent_event`
-- `holoqa_prepare_artifact_upload`
-- `holoqa_commit_artifact`
-- `holoqa_update_case_verdict`
-- `holoqa_complete_run`
-- `holoqa_get_run_status`
-- `holoqa_get_evidence`
-- `holoqa_export_report`
-
-The AI coder creates and approves plans through MCP, opens an agent session, runs the browser locally with `agent-browser`, and streams ordered events and Garage-backed artifacts to the server. Authentication stays local to the browser session; raw cookies and storage state are never sent to HoloQA. The dashboard is read-only for plans and runs.
-
-## SIT workbook
-
-The initial importer expects these headers on the first sheet:
-
-```text
-Test ID | Title | Steps | Expected Result
-```
-
-Separate steps with semicolons. HoloQA never overwrites the source workbook. Reports are written as JSON, HTML, and an annotated XLSX containing status, actual result, and evidence paths.
+Plain files. Inspect with `cat`, diff in git, no migrations.
 
 ## Development
 
 ```bash
 uv sync --dev
 uv run pytest -q
+uv run holoqa selftest
+holoqa validate examples/wolvesight.plan.yaml
 ```
 
-The reproducible demo workbook is at `fixtures/demo_cases.xlsx`. Regenerate it with
-`uv run python scripts/create_demo_workbook.py`.
+The browser end-to-end tests skip automatically when `agent-browser` is absent,
+so the offline suite stays green.
 
-## Documents
-
-- `docs/MVP_RUNBOOK.md` — Docker MVP scope and runbook.
-- `docs/ARCHITECTURE.md` — product and MCP architecture.
-- `docs/PRODUCT_PLAN.md` — canonical product plan and scope.
-- `docs/MILESTONES.md` — active delivery milestones.
-- `docs/testing/JUICESHOP_TEST_PLAN.md` — Juice Shop validation matrix.
+See `docs/DESIGN.md` for the architecture and the reasoning behind it.

@@ -1,0 +1,396 @@
+# Checklist rilis E2E staging Wolvesight — 31 langkah, tahap A–E.
+#
+# Port dari scripts/e2e-checklist/references/checklist-map.md. Endpoint di sini
+# adalah yang SUDAH TERVERIFIKASI pada run v0.4.2-beta (2026-09-10); jangan
+# menebak ulang.
+#
+# Catatan format:
+#   - nilai yang memuat {kurung} WAJIB dikutip di dalam flow mapping { }
+#   - status boleh berupa angka atau daftar, mis. status: [400, 403, 409]
+#   - langkah tanpa assertion yang bisa dicek mesin ditandai UJI LEMAH; verdict
+#     PASS di situ hanya berarti "ada bukti", jadi baca sendiri buktinya.
+
+meta:
+  app: wolvesight
+  base_url: ${STAGING_URL}
+  language: id
+  workbook: ./Checklist_E2E_Staging.xlsx
+
+known_behaviors:
+  - id: KB-001
+    title: SSE scan yang sudah selesai putus setelah ~6 detik (502 terminated)
+    applies_to: [A5]
+  - id: KB-002
+    title: GET /report/status berbentuk stage, bukan kunci `status`
+    applies_to: [C18]
+  - id: KB-003
+    title: Tipe scan diterima ganda (vulnerability_assessment / penetration_test)
+    applies_to: [A3]
+  - id: KB-004
+    title: Fitur di balik flag membalas 503, bukan 404 — itu Blokir, bukan Gagal
+    applies_to: [D26, E28]
+  - id: KB-005
+    title: Payload scan tanpa org id membuat branding senyap tidak muncul
+    applies_to: [C22]
+  - id: KB-006
+    title: Nama profil berbeda antara UI dan backend; yang mengikat scan_profile_id
+    applies_to: [A3]
+  - id: KB-007
+    title: Login form tidak bisa diotomatiskan (Turnstile asli) — sesi ditanam manual
+    applies_to: [A1]
+  - id: KB-008
+    title: Recon Phase 1 hanya muncul di halaman terakhir activity history
+    applies_to: [A6]
+  - id: KB-011
+    title: Token backend habis ~80 menit walau cookie NextAuth berlaku 24 jam
+    applies_to: [A1]
+  - id: KB-016
+    title: GET /api/branding wajib membawa orgId
+    applies_to: [C22]
+  - id: KB-017
+    title: Perubahan status finding memakai PATCH, bukan POST
+    applies_to: [E29, E30]
+  - id: KB-018
+    title: Share To butuh minimal satu akun ber-org-role VIEWER
+    applies_to: [E28]
+
+stages:
+  - id: A
+    title: Mulai scan
+  - id: B
+    title: Review dan approve finding
+  - id: C
+    title: Generate report
+  - id: D
+    title: Distribusi hasil
+  - id: E
+    title: Tindak lanjut temuan
+
+steps:
+  # ---------------------------------------------------------------- Tahap A
+
+  - id: A1
+    stage: A
+    title: Login ke staging dengan akun org uji
+    route: /dashboard
+    do: Pastikan sesi aktif, buka dashboard, periksa org aktif dan kartu kuota.
+    expect:
+      - api: { method: GET, path: /api/auth/session, status: 200 }
+      - url_contains: /dashboard
+      - screenshot: required
+    blocked_if: sesi tidak valid, atau org aktif bukan org uji
+
+  - id: A2
+    stage: A
+    title: Jalankan preflight ke target in-scope
+    route: /new
+    do: Pilih target in-scope, jalankan preflight.
+    expect:
+      - api: { method: POST, path: /api/scans/preflight, status: 200 }
+      - json: { ok: true, blockers: [] }
+      - screenshot: required
+    blocked_if: target in-scope belum terdaftar di org uji
+
+  - id: A3
+    stage: A
+    title: Buat scan blackbox profil Standard
+    depends_on: [A2]
+    route: /new
+    do: Mode blackbox, profil Standard (scan_profile_id 2), lalu Start.
+    expect:
+      - api: { method: POST, path: /api/scans, status: [200, 201] }
+      - json: { status: PENDING }
+      - capture: { scan_id: $.id }
+      - screenshot: required
+
+  - id: A4
+    stage: A
+    title: Scan mulai dieksekusi worker
+    depends_on: [A3]
+    route: /scans/{scan_id}
+    do: Buka tab Operation, tunggu status pindah ke RUNNING.
+    expect:
+      - api: { method: GET, path: "/api/scans/{scan_id}", status: 200 }
+      - json: { status: RUNNING }
+      - screenshot: required
+    blocked_if: masih PENDING lebih dari 10 menit — itu masalah worker
+
+  - id: A5
+    stage: A
+    title: Pantau progres lewat stream langsung
+    depends_on: [A3]
+    route: /scans/{scan_id}
+    do: Tap SSE ~25 detik, lalu ambil dua tangkapan berjarak sekitar satu menit.
+    expect:
+      - api: { method: GET, path: "/api/phase2/scans/{scan_id}/status", status: 200 }
+      - changed: dom
+      - screenshot: required
+
+  - id: A6
+    stage: A
+    title: Phase 1 selesai dan diserahkan ke Phase 2
+    depends_on: [A3]
+    route: /scans/{scan_id}
+    do: Tunggu stepper pindah ke Vulnerability Hunting.
+    expect:
+      - api: { method: GET, path: "/api/phase2/scans/{scan_id}/status", status: 200 }
+      - screenshot: required
+
+  - id: A7
+    stage: A
+    title: Scan mencapai status akhir dan notifikasi masuk
+    depends_on: [A3]
+    route: /scans/{scan_id}
+    do: Tunggu COMPLETED, periksa notifikasi in-app dan deep-link-nya.
+    expect:
+      - api: { method: GET, path: "/api/scans/{scan_id}", status: 200 }
+      - json: { status: COMPLETED }
+      - screenshot: required
+    # Notifikasi email tidak bisa diverifikasi dari harness ini. Kalau kotak
+    # masuk penguji tidak bisa diakses, tulis itu apa adanya dan jangan
+    # meluluskan langkah ini diam-diam.
+    blocked_if: kotak masuk email penguji tidak dapat diakses
+
+  # ---------------------------------------------------------------- Tahap B
+
+  - id: B8
+    stage: B
+    title: Buka daftar findings hasil scan
+    depends_on: [A3]
+    route: /scans/{scan_id}/results
+    do: Buka daftar temuan; catat jumlahnya, dipakai lagi di langkah C19.
+    expect:
+      - api: { method: GET, path: "/api/phase2/scans/{scan_id}/findings", status: 200 }
+      - screenshot: required
+
+  - id: B9
+    stage: B
+    title: Buka detail satu finding
+    depends_on: [B8]
+    route: /vulnerabilities/{finding_id}
+    do: Pastikan deskripsi, bukti request/response, dan langkah reproduksi terbaca utuh.
+    expect:
+      - api: { method: GET, path: "/api/phase2/scans/{scan_id}/findings", status: 200 }
+      - capture: { finding_id: "$.items[0].id" }
+      - screenshot: required
+
+  - id: B10
+    stage: B
+    title: "UJI NEGATIF — generate report ditolak sebelum ada approve"
+    depends_on: [A3]
+    route: /scans/{scan_id}/report
+    do: Klik Generate tanpa approve apa pun. Yang benar adalah sistem MENOLAK.
+    expect:
+      - api: { method: POST, path: "/api/phase2/scans/{scan_id}/report/generate", status: [400, 403, 409, 422] }
+      - text_contains: Approve findings before generating the report
+      - screenshot: required
+    # Catatan lapangan v0.4.2-beta: gate ini TIDAK ADA pada build itu — POST
+    # benar-benar membuat report dan tombol berubah jadi "Regenerate report".
+    # Kalau terulang, langkah ini memang Gagal, dan C17 sudah punya report.
+
+  - id: B11
+    stage: B
+    title: Approve satu finding
+    depends_on: [B9]
+    do: Approve; kedua state harus berubah dalam SATU respons yang sama.
+    expect:
+      - api: { method: POST, path: "/api/phase2/scans/{scan_id}/findings/{finding_id}/approve", status: 200 }
+      - json: { human_review_state: approved, enrichment_state: queued }
+      - screenshot: required
+
+  - id: B12
+    stage: B
+    title: "UJI NEGATIF — generate ditolak saat enrichment masih jalan"
+    depends_on: [B11]
+    do: Rangkai approve lalu langsung cek gate; jendelanya hitungan detik.
+    expect:
+      - api: { method: POST, path: "/api/phase2/scans/{scan_id}/report/generate", status: [400, 403, 409, 422] }
+      - text_contains: still enriching
+      - screenshot: required
+    blocked_if: jendela enrichment tertutup sebelum gate sempat diperiksa
+
+  - id: B13
+    stage: B
+    title: Enrichment finding selesai tanpa reload manual
+    depends_on: [B11]
+    do: Ambil dua dump berjarak yang memperlihatkan transisi state.
+    expect:
+      - api: { method: GET, path: "/api/phase2/scans/{scan_id}/findings/enrichment-progress", status: 200 }
+      - changed: api
+      - screenshot: required
+
+  - id: B14
+    stage: B
+    title: Bulk approve sisa finding yang valid
+    depends_on: [B8]
+    do: Pilih sisa finding valid, bulk approve, bandingkan SET id-nya bukan jumlahnya.
+    expect:
+      - api: { method: POST, path: "/api/phase2/scans/{scan_id}/findings/bulk-approve", status: 200 }
+      - screenshot: required
+    # UJI LEMAH: kesamaan set id harus dibaca manual dari dump; tulis di catatan.
+
+  - id: B15
+    stage: B
+    title: Reject satu finding yang false positive
+    depends_on: [B8]
+    do: Reject satu finding; catat id-nya untuk verifikasi C19 dan D26.
+    expect:
+      - api: { method: POST, path: "/api/phase2/scans/{scan_id}/findings/{finding_id}/reject", status: 200 }
+      - json: { human_review_state: rejected }
+      - screenshot: required
+
+  - id: B16
+    stage: B
+    title: Tidak ada enrichment yang menggantung
+    depends_on: [B11]
+    expect:
+      - api: { method: GET, path: "/api/phase2/scans/{scan_id}/findings/enrichment-status", status: 200 }
+      - screenshot: required
+    blocked_if: ada finding diam di in_progress tanpa batas — sebutkan id dan durasinya
+
+  # ---------------------------------------------------------------- Tahap C
+
+  - id: C17
+    stage: C
+    title: Generate report setelah gate terpenuhi
+    depends_on: [B11]
+    route: /scans/{scan_id}/report
+    expect:
+      - api: { method: POST, path: "/api/phase2/scans/{scan_id}/report/generate", status: [200, 202] }
+      - screenshot: required
+
+  - id: C18
+    stage: C
+    title: Proses generate selesai
+    depends_on: [C17]
+    do: Polling harus berakhir di stage selesai, bukan berputar tanpa henti.
+    expect:
+      - api: { method: GET, path: "/api/phase2/scans/{scan_id}/report/status", status: 200 }
+      - screenshot: required
+    blocked_if: polling melewati ~10 menit tanpa mencapai stage akhir
+
+  - id: C19
+    stage: C
+    title: Isi report cocok dengan finding approved
+    depends_on: [C18, B15]
+    do: Jumlah temuan di report harus sama persis dengan approved; yang di-reject tidak boleh bocor.
+    expect:
+      - api: { method: GET, path: "/api/phase2/scans/{scan_id}/report", status: 200 }
+      - screenshot: required
+    # UJI LEMAH: kecocokan jumlah dibaca manual. Sebutkan kedua angka di catatan.
+
+  - id: C20
+    stage: C
+    title: Ganti template report menghasilkan dokumen berbeda
+    depends_on: [C18]
+    do: Technical, Executive, Compliance, Remediation — empat tangkapan, harus berbeda.
+    expect:
+      - api: { method: GET, path: "/api/phase2/scans/{scan_id}/report", status: 200 }
+      - changed: dom
+      - screenshot: required
+
+  - id: C21
+    stage: C
+    title: Ganti bahasa report mengubah isi dan ekspornya
+    depends_on: [C18]
+    expect:
+      - changed: dom
+      - screenshot: required
+
+  - id: C22
+    stage: C
+    title: Branding organisasi muncul di dokumen dan ekspor
+    depends_on: [C18]
+    do: Periksa logo, warna utama, disclaimer, footer. Ingat KB-005 dan KB-016.
+    expect:
+      - api: { method: GET, path: /api/branding, status: 200 }
+      - screenshot: required
+    blocked_if: org uji belum mengisi branding apa pun
+
+  - id: C23
+    stage: C
+    title: Regenerate report mengubah generated_at
+    depends_on: [C18]
+    do: Ambil status sebelum dan sesudah — dua berkas.
+    expect:
+      - api: { method: GET, path: "/api/phase2/scans/{scan_id}/report", status: 200 }
+      - changed: api
+      - screenshot: required
+
+  # ---------------------------------------------------------------- Tahap D
+
+  - id: D24
+    stage: D
+    title: Ekspor keempat format dan isinya benar
+    depends_on: [C18]
+    do: Unduh Markdown, HTML, PDF, PPTX lewat capture download, lalu buka isinya.
+    expect:
+      - screenshot: required
+    # UJI LEMAH: keutuhan berkas (PDF punya halaman, bukan halaman kosong)
+    # diperiksa manual. Lampirkan tiap berkas sebagai bukti download.
+
+  - id: D25
+    stage: D
+    title: Mode presentasi hanya menampilkan finding approved
+    depends_on: [B15, C18]
+    route: /present/{scan_id}
+    expect:
+      - url_contains: /present
+      - screenshot: required
+
+  - id: D26
+    stage: D
+    title: Share link terbuka tanpa login dan approved-only
+    depends_on: [C18]
+    do: Buka di konteks browser yang cookie-nya sudah dibersihkan.
+    expect:
+      - api: { method: GET, path: "/api/scans/{scan_id}/share-links", status: 200 }
+      - screenshot: required
+    blocked_if: fitur share link mati di lingkungan ini (503, lihat KB-004)
+
+  - id: D27
+    stage: D
+    title: "UJI NEGATIF — share link yang dicabut tidak bisa dibuka lagi"
+    depends_on: [D26]
+    do: Cabut token, lalu coba buka. Akses berhasil berarti Gagal.
+    expect:
+      - api: { method: DELETE, path: "/api/scans/{scan_id}/share-links", status: [200, 204] }
+      - screenshot: required
+
+  # ---------------------------------------------------------------- Tahap E
+
+  - id: E28
+    stage: E
+    title: Share To satu finding ke PIC memindahkan lifecycle ke DELEGATED
+    depends_on: [B9]
+    expect:
+      - api: { method: POST, path: "/api/findings/{finding_id}/share", status: 200 }
+      - screenshot: required
+    blocked_if: tidak ada akun ber-org-role VIEWER untuk memverifikasi (KB-018)
+
+  - id: E29
+    stage: E
+    title: "UJI NEGATIF — finding tidak bisa dikembalikan ke OPEN"
+    depends_on: [E28]
+    do: Penolakan harus 4xx yang bermakna. Menolak dengan 500 tetap Gagal.
+    expect:
+      - api: { method: PATCH, path: "/api/findings/{finding_id}/status", status: [400, 409, 422] }
+      - screenshot: required
+
+  - id: E30
+    stage: E
+    title: Tutup finding lewat Update Status, sesudahnya hanya Retest tersedia
+    depends_on: [B9]
+    expect:
+      - api: { method: PATCH, path: "/api/findings/{finding_id}/status", status: 200 }
+      - screenshot: required
+
+  - id: E31
+    stage: E
+    title: Jejak audit lengkap dengan aktornya
+    depends_on: [E30]
+    do: Approve, reject, generate report, dan perubahan status harus tercatat dengan aktor nyata.
+    expect:
+      - api: { method: GET, path: "/api/findings/{finding_id}/activity", status: 200 }
+      - screenshot: required
+    # UJI LEMAH: "aktornya bukan system/kosong" dibaca manual dari dump.
