@@ -48,7 +48,7 @@ No API key. No provider config. No server, no Docker, no database, no port.
 Install is one MCP entry plus `agent-browser` on PATH:
 
 ```jsonc
-{ "mcpServers": { "holoqa": { "command": "uvx", "args": ["holoqa"] } } }
+{ "mcpServers": { "holoqa": { "command": "holoqa", "args": [] } } }
 ```
 
 ## The plan file

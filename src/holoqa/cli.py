@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -238,6 +240,60 @@ def _plan_refusal(workspace: Path, label: str, source: str, fragment: str) -> st
     raise SelftestFailure(f"{label}: NOT refused")
 
 
+def init(app: str, url: str, output: str) -> int:
+    """Scaffold a starter plan next to the application under test."""
+    target = Path(output).expanduser()
+    if target.exists():
+        print(f"refusing to overwrite {target}", file=sys.stderr)
+        return 2
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(plan_module.scaffold(app, url), encoding="utf-8")
+    # Plain ASCII: the Windows console is cp1252 by default and turns an
+    # em-dash into a replacement character.
+    print(f"wrote {target}")
+    print()
+    print("Next:")
+    print(f"  1. edit {target} - describe your real steps and assertions")
+    print(f"  2. holoqa validate {target}")
+    print(f'  3. in your AI client: "run the checklist in {target} using holoqa"')
+    return 0
+
+
+def doctor() -> int:
+    """Check that the pieces a run depends on are actually present."""
+    ok = True
+
+    print(f"holoqa           {__version__}")
+
+    found = shutil.which("agent-browser")
+    if found:
+        try:
+            version = subprocess.run(
+                ([ "cmd", "/c", found, "--version"] if os.name == "nt" and
+                 found.lower().endswith((".cmd", ".bat")) else [found, "--version"]),
+                capture_output=True, text=True, timeout=60,
+            ).stdout.strip()
+        except Exception:
+            version = "installed"
+        print(f"agent-browser    {version}")
+    else:
+        ok = False
+        print("agent-browser    MISSING")
+        print("                 install it: npm install -g agent-browser")
+
+    print()
+    print("MCP client entry:")
+    print('  { "mcpServers": { "holoqa": { "command": "holoqa", "args": [] } } }')
+
+    if not ok:
+        print(
+            "\nagent-browser is required: HoloQA captures evidence through it "
+            "and cannot judge a step without captures.",
+            file=sys.stderr,
+        )
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="holoqa", description=__doc__)
     parser.add_argument("--version", action="version", version=f"holoqa {__version__}")
@@ -245,6 +301,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("mcp", help="run the stdio MCP server (default)")
     sub.add_parser("selftest", help="verify every guardrail, offline")
+    sub.add_parser("doctor", help="check agent-browser and show the MCP entry")
+    starter = sub.add_parser("init", help="scaffold a starter plan file")
+    starter.add_argument("--app", default="myapp", help="application name")
+    starter.add_argument("--url", default="https://staging.example", help="base URL")
+    starter.add_argument("-o", "--output", default="holoqa.plan.yaml")
     validate = sub.add_parser("validate", help="validate a plan file")
     validate.add_argument("plan")
     status = sub.add_parser("status", help="show the active run")
@@ -254,6 +315,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "selftest":
         return selftest()
+    if args.command == "doctor":
+        return doctor()
+    if args.command == "init":
+        return init(args.app, args.url, args.output)
     # A malformed plan is ordinary user input, not a crash. Print the reason
     # and the hint, never a traceback.
     if args.command == "validate":

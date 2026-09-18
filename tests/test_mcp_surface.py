@@ -84,3 +84,41 @@ def test_block_requires_a_substantive_reason(tools, tmp_path, monkeypatch):
     result = holoqa_block("X", "the VIEWER role does not exist in this environment")
     assert result["verdict"] == BLOCKED
     assert run.read()["steps"]["X"]["decided_by"] == "agent"
+
+
+def test_plan_validate_with_no_path_returns_the_format_reference():
+    """A fresh agent must be able to learn the schema without guessing."""
+    from holoqa.mcp import holoqa_plan_validate
+
+    reference = holoqa_plan_validate()
+    assert reference["status"] == "reference"
+    assert set(reference["assertions"]) == {
+        "url_contains", "url_matches", "text_contains", "text_not_contains",
+        "api", "json", "screenshot", "changed", "capture",
+    }
+    assert "quoting" in reference
+    assert "meta:" in reference["template"]
+
+
+def test_the_shipped_template_actually_validates(tmp_path):
+    """A scaffold that does not pass its own linter is a broken first run."""
+    from holoqa import plan as plan_module
+
+    path = tmp_path / "holoqa.plan.yaml"
+    path.write_text(plan_module.scaffold("demo", "https://staging.test"), encoding="utf-8")
+    assert plan_module.lint(path)["status"] == "ok"
+
+
+def test_commented_out_sections_are_not_a_validation_error(tmp_path):
+    """Users comment out known_behaviors first; YAML makes that null, not []."""
+    from holoqa import plan as plan_module
+
+    path = tmp_path / "p.yaml"
+    path.write_text(
+        "meta: { app: t }\nknown_behaviors:\n  # - id: KB-001\nstages:\n"
+        "steps:\n  - id: A\n    title: t\n    expect:\n      - screenshot: required\n",
+        encoding="utf-8",
+    )
+    plan = plan_module.load(path)
+    assert plan.known_behaviors == []
+    assert plan.stages == []

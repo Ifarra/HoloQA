@@ -13,23 +13,68 @@ model.
 
 ## Install
 
+HoloQA is not on PyPI; install it from this repository.
+
 ```bash
-uv tool install holoqa          # or: uvx holoqa
-npm install -g agent-browser    # the browser driver (deterministic, no AI)
+uv tool install git+https://github.com/USER/holoqa      # provides `holoqa`
+npm install -g agent-browser                            # the browser driver
 ```
+
+`agent-browser` is a deterministic automation CLI (Playwright underneath). It
+is not an AI agent and needs no API key.
 
 Then one entry in your MCP client:
 
 ```jsonc
 // ~/.claude.json  or  Cursor MCP settings
-{ "mcpServers": { "holoqa": { "command": "uvx", "args": ["holoqa"] } } }
+{ "mcpServers": { "holoqa": { "command": "holoqa", "args": [] } } }
 ```
 
-Verify it before trusting it:
+Check the setup before trusting it:
 
 ```bash
-holoqa selftest     # 18 guardrails, offline, no browser
+holoqa doctor       # is agent-browser present? what MCP entry do I need?
+holoqa selftest     # 18 guardrails, offline, no browser, no network
 ```
+
+<details>
+<summary>Without installing (run from a clone)</summary>
+
+```bash
+git clone https://github.com/USER/holoqa && cd holoqa && uv sync
+uv run holoqa doctor
+```
+
+MCP entry for a clone — use an absolute path to the repo:
+
+```jsonc
+{ "mcpServers": { "holoqa": {
+    "command": "uv",
+    "args": ["run", "--directory", "/absolute/path/to/holoqa", "holoqa"] } } }
+```
+
+</details>
+
+## First run on your own app
+
+```bash
+cd ~/code/your-app
+holoqa init --app your-app --url https://staging.your-app.test
+```
+
+That writes `holoqa.plan.yaml` with one working step and commented examples.
+Edit it to describe real steps, then:
+
+```bash
+holoqa validate holoqa.plan.yaml
+```
+
+Then in your AI client: **"run the checklist in holoqa.plan.yaml using holoqa."**
+
+Writing the plan is the one part that is yours. It is the contract that decides
+every verdict, which is why a human owns it — and your agent can draft it for
+you by calling `holoqa_plan_validate` with no argument to get the format, then
+exploring the app. Review what it writes; commit it.
 
 ## How a run works
 

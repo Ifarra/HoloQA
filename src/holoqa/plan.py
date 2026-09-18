@@ -159,6 +159,13 @@ def load(path: str | Path) -> Plan:
     if isinstance(meta, dict) and meta.get("base_url"):
         meta["base_url"] = _expand_env(str(meta["base_url"]))
 
+    # A section whose entries are all commented out parses as null, not as an
+    # empty list. That is the first thing a new user does to the template, so
+    # treat it as empty rather than as a validation error.
+    for optional in ("known_behaviors", "stages"):
+        if data.get(optional) is None:
+            data[optional] = []
+
     try:
         plan = Plan(
             **data,
@@ -298,3 +305,93 @@ def lint(path: str | Path) -> dict[str, Any]:
         "known_behaviors": [entry.id for entry in plan.known_behaviors],
         "warnings": warnings,
     }
+
+
+TEMPLATE = '''# HoloQA plan for {app}
+#
+# You write this file; HoloQA never edits it. It is the contract that decides
+# every verdict, which is why a human owns it.
+#
+# Quoting: inside a flow mapping {{ }}, values containing {{braces}} or
+# [brackets] must be quoted — path: "/api/orders/{{order_id}}"
+
+meta:
+  app: {app}
+  base_url: {url}
+  language: en
+  # workbook: ./Checklist.xlsx      # optional: annotate an existing checklist
+
+known_behaviors:
+  # Quirks that look like bugs but are known. Cite them with holoqa_note so a
+  # re-run does not report them as new failures.
+  # - id: KB-001
+  #   title: search is eventually consistent for a few seconds
+  #   applies_to: [A2]
+
+stages:
+  - id: A
+    title: Smoke
+
+steps:
+  - id: A1
+    stage: A
+    title: The home page loads
+    route: /
+    do: Open the application.
+    expect:
+      - url_contains: {url}
+      - screenshot: required
+
+  # - id: A2
+  #   stage: A
+  #   title: Placing an order returns 201 PENDING
+  #   depends_on: [A1]
+  #   do: Fill the cart and submit.
+  #   expect:
+  #     - api: {{ method: POST, path: /api/orders, status: 201 }}
+  #     - json: {{ status: PENDING }}
+  #     - capture: {{ order_id: $.id }}
+  #     - screenshot: required
+  #
+  # - id: A3
+  #   stage: A
+  #   title: The order reads back
+  #   depends_on: [A2]
+  #   expect:
+  #     - api: {{ method: GET, path: "/api/orders/{{order_id}}", status: 200 }}
+  #     - text_contains: Thank you
+'''
+
+
+FORMAT_REFERENCE = {
+    "how_it_works": (
+        "You drive the browser with agent-browser. HoloQA captures evidence via "
+        "holoqa_observe and derives the verdict via holoqa_judge. You cannot "
+        "record a pass; BLOCKED is the only verdict you may assert."
+    ),
+    "assertions": {
+        "url_contains": "substring of the captured URL (needs a dom capture)",
+        "url_matches": "regex against the captured URL (needs a dom capture)",
+        "text_contains": "substring of visible page text (needs a dom capture)",
+        "text_not_contains": "text that must be absent (needs a dom capture)",
+        "api": "{method, path, status} — status may be an int or a list",
+        "json": "subset or JSONPath match against the last api capture body",
+        "screenshot": "'required' — a non-empty image exists for this step",
+        "changed": "'dom' or 'api' — two captures, taken apart, must differ",
+        "capture": "{name: $.json.path} — binds a value for later steps",
+    },
+    "quoting": (
+        "Inside a flow mapping { }, quote values containing {braces} or "
+        '[brackets]: path: "/api/orders/{order_id}", capture: { id: "$.items[0].id" }'
+    ),
+    "rules": [
+        "A step may only reference {variables} captured by an earlier step.",
+        "depends_on must point at steps that appear earlier in the file.",
+        "Anything not expressible as an assertion is BLOCKED with a cause, never a soft pass.",
+    ],
+    "template": TEMPLATE.format(app="myapp", url="https://staging.example"),
+}
+
+
+def scaffold(app: str, url: str) -> str:
+    return TEMPLATE.format(app=app, url=url)

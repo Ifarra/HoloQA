@@ -68,8 +68,15 @@ def _resolve_url(run: Run, path: str) -> str:
 # ---------------------------------------------------------------------- tools
 
 
-def holoqa_plan_validate(plan_path: str) -> dict[str, Any]:
-    """Validate a plan file and summarize it. Executes nothing."""
+def holoqa_plan_validate(plan_path: str = "") -> dict[str, Any]:
+    """Validate a plan file, or call with no path to learn the plan format.
+
+    With no argument this returns the assertion reference and a starter
+    template, so you can write a plan for a new application without guessing
+    at the schema.
+    """
+    if not plan_path.strip():
+        return {"status": "reference", **plan_module.FORMAT_REFERENCE}
     return plan_module.lint(plan_path)
 
 
