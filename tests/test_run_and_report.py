@@ -198,3 +198,31 @@ def test_flaky_steps_surface_after_enough_runs(tmp_path, plan):
     unstable = history_module.flaky(last)
     assert [item["step"] for item in unstable] == ["T2"]
     assert unstable[0]["runs"] == 4
+
+
+def test_a_pass_does_not_inherit_the_note_from_a_verdict_it_replaced(plan, run):
+    """A step that failed, then passed on retry, must not read as contradictory."""
+    screenshot_evidence(run, "T1", "t1-shot")
+    run.set_verdict("T1", FAIL, note="not found in page text")
+    run.set_verdict("T1", PASS)
+
+    step = run.read()["steps"]["T1"]
+    assert step["verdict"] == PASS
+    assert step["verdict_note"] == ""
+    # the superseded reason survives where it belongs
+    assert step["revisions"][0]["previous_note"] == "not found in page text"
+
+    report_module.markdown(run)
+    row = next(
+        line for line in (run.out_dir / "report.md").read_text(encoding="utf-8").splitlines()
+        if line.startswith("| T1 ")
+    )
+    assert "not found in page text" not in row
+
+
+def test_a_testers_own_note_survives_rejudging(plan, run):
+    screenshot_evidence(run, "T1", "t1-shot")
+    run.note("T1", "celery_workers.count=3, DNS resolved, TCP 443 open")
+    run.set_verdict("T1", PASS)
+    step = run.read()["steps"]["T1"]
+    assert step["note"] == "celery_workers.count=3, DNS resolved, TCP 443 open"

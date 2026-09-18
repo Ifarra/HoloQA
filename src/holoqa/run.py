@@ -80,6 +80,7 @@ class Run:
                 "title": step.title,
                 "verdict": None,
                 "note": "",
+                "verdict_note": "",
                 "observations": [],
                 "assertions": [],
                 "kb_refs": [],
@@ -214,7 +215,12 @@ class Run:
         step = self.step(data, step_id)
 
         note = (note or "").strip()
-        merged_note = note or step.get("note", "")
+
+        # A derived verdict explains itself in `verdict_note`; a human's own
+        # observation lives in `note` and survives re-judging. Keeping them
+        # apart stops a stale failure message from trailing a later PASS.
+        derived = by != "agent"
+        cause = note if derived else (note or step.get("note", ""))
 
         # Guardrail 1: no evidence, no pass.
         if verdict == PASS and not step["observations"]:
@@ -223,7 +229,7 @@ class Run:
                 "Capture an observation first, or record BLOCKED with a cause."
             )
         # Guardrail 2: a non-pass must say why.
-        if verdict != PASS and not merged_note:
+        if verdict != PASS and not (cause or step.get("note", "")):
             raise GuardrailError(
                 f"step {step_id}: {verdict} requires a note giving the concrete cause"
             )
@@ -236,12 +242,16 @@ class Run:
                     "from": previous,
                     "to": verdict,
                     "at": now(),
-                    "previous_note": step.get("note", ""),
+                    "previous_note": step.get("verdict_note") or step.get("note", ""),
                 }
             )
 
         step["verdict"] = verdict
-        step["note"] = merged_note
+        if derived:
+            step["verdict_note"] = cause
+        else:
+            step["note"] = cause
+            step["verdict_note"] = ""
         step["decided_by"] = by
         if assertions is not None:
             step["assertions"] = assertions

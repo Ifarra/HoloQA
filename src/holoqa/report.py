@@ -37,7 +37,7 @@ def validate(run: Run, *, strict: bool = True) -> dict[str, Any]:
             continue
         if verdict == PASS and not step["observations"]:
             missing_evidence.append(step_id)
-        if verdict != PASS and not (step.get("note") or "").strip():
+        if verdict != PASS and not _cause(step):
             missing_cause.append(step_id)
 
     problems = []
@@ -54,6 +54,11 @@ def validate(run: Run, *, strict: bool = True) -> dict[str, Any]:
         "unjudged": unjudged,
         "counts": _counts(data),
     }
+
+
+def _cause(step: dict[str, Any]) -> str:
+    """The reason a step did not pass: derived first, then the human note."""
+    return (step.get("verdict_note") or step.get("note") or "").strip()
 
 
 def _counts(data: dict[str, Any]) -> dict[str, int]:
@@ -91,7 +96,9 @@ def markdown(run: Run) -> Path:
 
     for step_id, step in data["steps"].items():
         evidence = ", ".join(f"`{item['file']}`" for item in step["observations"]) or "—"
-        note = (step.get("note") or "").replace("|", "\\|") or "—"
+        # A derived failure reason first, otherwise the tester's own note. A
+        # passing step never inherits the message from a verdict it replaced.
+        note = _cause(step).replace("|", "\\|") or "—"
         lines.append(
             f"| {step_id} | {step['title']} | {_STATUS_MARK.get(step.get('verdict'), '—')} "
             f"| {step.get('decided_by', '—')} | {evidence} | {note} |"
