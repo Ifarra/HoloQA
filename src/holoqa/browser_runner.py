@@ -66,7 +66,7 @@ def _evaluate_expected(expected: str, page: Any, responses: list[dict[str, Any]]
     return ("PASS" if passed else "FAIL", observed_text[:1000])
 
 
-def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path, on_event: Any | None = None, cancel_check: Any | None = None, control_check: Any | None = None) -> list[dict[str, Any]]:
+def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path, on_event: Any | None = None, cancel_check: Any | None = None, control_check: Any | None = None, auth_profile_path: str | None = None) -> list[dict[str, Any]]:
     """Execute the documented demo workflow and preserve step-level evidence."""
     from playwright.sync_api import sync_playwright
 
@@ -83,7 +83,7 @@ def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path
                 raise CancelledBrowserRun("Run cancelled before the next test case")
             case_dir = artifact_dir / case["test_id"]
             case_dir.mkdir(parents=True, exist_ok=True)
-            context = browser.new_context()
+            context = browser.new_context(storage_state=auth_profile_path) if auth_profile_path else browser.new_context()
             context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = context.new_page()
             evidence: list[str] = []
@@ -94,12 +94,32 @@ def execute_cases(cases: list[dict[str, Any]], base_url: str, artifact_dir: Path
             page.on("console", lambda message: console_messages.append(message.text))
             try:
                 emit(event_type="case_started", test_id=case["test_id"], message=case.get("title", ""), payload={"total_cases": len(cases), "completed_cases": len(results)})
-                page.goto(f"{base_url.rstrip('/')}/demo", wait_until="domcontentloaded")
+                page.goto(base_url, wait_until="domcontentloaded")
                 page.wait_for_timeout(200)
                 _dismiss_overlays(page)
                 evidence.append(str(case_dir / "initial.png"))
                 page.screenshot(path=evidence[-1], full_page=True)
-                for step_index, step in enumerate(case.get("steps", [])):
+                variables = {str(key): str(value) for key, value in (case.get("variables") or {}).items()}
+                for step_index, raw_step in enumerate(case.get("steps", [])):
+                    if isinstance(raw_step, dict):
+                        action = str(raw_step.get("action") or "").lower()
+                        target = str(raw_step.get("target") or raw_step.get("value") or "")
+                        if action == "navigate":
+                            step = f"navigate {target}"
+                        elif action == "fill":
+                            locator = raw_step.get("locator") or {}
+                            label = locator.get("value") if isinstance(locator, dict) else str(locator)
+                            step = f"fill {label} with {raw_step.get('value', '')}"
+                        elif action in {"assert_url", "assert_text", "assert_status"}:
+                            step = f"assert {action.removeprefix('assert_')} {target}"
+                        elif action == "click":
+                            step = f"click {target}"
+                        else:
+                            raise BlockedBrowserStep(f"unsupported action: {action or 'missing action'}")
+                    else:
+                        step = str(raw_step)
+                    for key, value in variables.items():
+                        step = step.replace("{{" + key + "}}", value)
                     while control_check and control_check():
                         emit(event_type="human_takeover", test_id=case["test_id"], step=step, message="Agent paused while human controls the browser")
                         time.sleep(0.35)

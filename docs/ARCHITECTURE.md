@@ -357,16 +357,16 @@ HoloQA validates policy and prerequisites
           ↓
 Agent/user approves
           ↓
-Agent calls execute_run
+AI coder calls open_run_session
           ↓
-HoloQA worker runs browser + observers
+AI coder runs local agent-browser and records ordered observations/actions
           ↓
-Agent polls or receives status/resource updates
+HoloQA stores events and Garage-backed artifacts; dashboard monitors
           ↓
 Agent requests report/workbook
 ```
 
-This is the key design compromise: HoloQA does not host an LLM agent, but it does host deterministic workers that perform indexing, browser actions, evidence capture, and report generation. Otherwise every external coding agent would need to implement and coordinate those mechanics independently.
+HoloQA is a control plane and execution harness, not a browser worker. The connected AI coder owns browser reasoning, local authentication, recovery, and agent-browser execution. HoloQA validates and persists the resulting run contract, events, evidence metadata, and reports.
 
 ## 10. Security and trust model
 
@@ -419,7 +419,7 @@ The first release should support one local stdio server and one optional remote 
 
 1. **Local bridge first or remote HTTP first?** Recommended: local stdio first.
 2. **Does the control plane receive source code?** Recommended: configurable metadata-only default; full source upload opt-in.
-3. **Does HoloQA execute browser actions itself?** Recommended: yes, through deterministic workers; the external agent still owns intent and conversation.
+3. **Does HoloQA execute browser actions itself?** No. The connected AI coder executes through local agent-browser; HoloQA only records and monitors the session.
 4. **Does HoloQA include its own LLM?** Recommended: no for MVP.
 5. **Does CodeGraph remain an external dependency?** Recommended: adapter plus pinned version; do not fork initially.
 6. **How does the agent know to use HoloQA?** Use clear tool descriptions, MCP prompts, and a concise integration README; do not depend on hidden instructions.

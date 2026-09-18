@@ -2,23 +2,25 @@ from __future__ import annotations
 
 import html
 import json
+import mimetypes
 import os
 import time
+from collections import defaultdict
+from typing import Any
 from pathlib import Path
 
 
-DEFAULT_STATE_DATABASE = ".holoqa/state.db"
-
-
 def default_database_path() -> Path:
-    return Path(os.environ.get("HOLOQA_STATE", DEFAULT_STATE_DATABASE))
+    from holoqa.config import state_database
+    return state_database()
 
-from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, Response
 
-from holoqa.execution_service import set_control_mode, start_background_run
+from holoqa.execution_service import set_control_mode
 from holoqa.project_store import ProjectStore
 from holoqa.runs import RunStore
+from holoqa.object_storage import download
 
 
 def _esc(value: object) -> str:
@@ -32,6 +34,72 @@ def _status_class(status: str) -> str:
 def create_app(database_path: Path) -> FastAPI:
     store = ProjectStore(database_path)
     app = FastAPI(title="HoloQA Dashboard", version="0.1.0")
+    live_clients: dict[str, set[WebSocket]] = defaultdict(set)
+    live_agents: dict[str, WebSocket] = {}
+    latest_frames: dict[str, dict[str, Any]] = {}
+
+    async def broadcast(run_id: str, message: dict[str, Any], *, exclude: WebSocket | None = None) -> None:
+        stale: list[WebSocket] = []
+        for client in live_clients.get(run_id, set()):
+            if client is exclude:
+                continue
+            try:
+                await client.send_json(message)
+            except Exception:
+                stale.append(client)
+        for client in stale:
+            live_clients[run_id].discard(client)
+
+    @app.websocket("/api/runs/{run_id}/live")
+    async def live_browser(run_id: str, websocket: WebSocket) -> None:
+        role = websocket.query_params.get("role", "viewer")
+        token = websocket.query_params.get("token")
+        run_store = RunStore(database_path)
+        try:
+            run = run_store.get(run_id)
+            if role == "agent":
+                if not token:
+                    await websocket.close(code=4401)
+                    return
+                run_store.authorize_agent(run_id, token)
+            await websocket.accept()
+        except ValueError:
+            await websocket.close(code=4404)
+            return
+
+        if role == "agent":
+            live_agents[run_id] = websocket
+        else:
+            live_clients[run_id].add(websocket)
+            await websocket.send_json({"type": "live_state", "run": run.model_dump(), "connected": run_id in live_agents, "frame": latest_frames.get(run_id)})
+        try:
+            while True:
+                message = json.loads(await websocket.receive_text())
+                message_type = str(message.get("type") or "")
+                if role != "agent":
+                    continue
+                if message_type == "frame":
+                    frame = {"type": "frame", "run_id": run_id, "data": message.get("data"), "mime": message.get("mime", "image/jpeg"), "url": message.get("url", ""), "captured_at": message.get("captured_at", time.time())}
+                    latest_frames[run_id] = frame
+                    await broadcast(run_id, frame, exclude=websocket)
+                elif message_type == "heartbeat":
+                    current = run_store.heartbeat_agent(run_id, token or "")
+                    await broadcast(run_id, {"type": "agent_state", "run": current.model_dump()}, exclude=websocket)
+                elif message_type == "event":
+                    current = run_store.record_agent_event(run_id, token or "", sequence=int(message["sequence"]), event_type=str(message["event_type"]), test_id=message.get("test_id"), step=message.get("step"), status=message.get("status"), message=str(message.get("message") or ""), payload=message.get("payload") or {})
+                    await broadcast(run_id, {"type": "agent_event", "event": message, "run": current.model_dump()}, exclude=websocket)
+                elif message_type == "command_result":
+                    await broadcast(run_id, {"type": "command_result", "payload": message}, exclude=websocket)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            if role == "agent":
+                if live_agents.get(run_id) is websocket:
+                    live_agents.pop(run_id, None)
+                run_store.disconnect_agent(run_id)
+                await broadcast(run_id, {"type": "agent_state", "connected": False})
+            else:
+                live_clients[run_id].discard(websocket)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -43,13 +111,7 @@ def create_app(database_path: Path) -> FastAPI:
 
     @app.post("/api/projects/initialize")
     def initialize_project(payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
-        workspace_root = str(payload.get("workspace_root") or "")
-        if not workspace_root:
-            raise HTTPException(status_code=400, detail="workspace_root is required")
-        try:
-            return store.initialize(Path(workspace_root)).model_dump()
-        except ValueError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
+        raise HTTPException(status_code=405, detail="Projects are initialized by the connected AI coder through MCP")
 
     @app.get("/api/environments")
     def environments(project_id: str | None = None) -> dict[str, object]:
@@ -87,14 +149,7 @@ def create_app(database_path: Path) -> FastAPI:
 
     @app.post("/api/plans")
     def create_plan(payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
-        project_id = str(payload.get("project_id") or "")
-        cases = payload.get("cases")
-        if not project_id or not isinstance(cases, list) or not cases:
-            raise HTTPException(status_code=400, detail="project_id and at least one test case are required")
-        name = str(payload.get("name") or "Untitled plan")
-        environment = str(payload.get("environment") or "local")
-        plan = RunStore(database_path).create_plan(project_id, cases, environment=environment, name=name)
-        return plan.model_dump()
+        raise HTTPException(status_code=405, detail="Plans are created by the connected AI coder through MCP")
 
     @app.get("/api/plans/{plan_id}")
     def plan_status(plan_id: str) -> dict[str, object]:
@@ -105,20 +160,11 @@ def create_app(database_path: Path) -> FastAPI:
 
     @app.post("/api/plans/{plan_id}/approve")
     def approve_plan(plan_id: str) -> dict[str, object]:
-        try:
-            runs = RunStore(database_path)
-            runs.approve(plan_id)
-            return runs.get_plan(plan_id).model_dump()
-        except ValueError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+        raise HTTPException(status_code=405, detail="Plans are approved by the connected AI coder through MCP")
 
     @app.post("/api/plans/{plan_id}/start")
     def start_plan(plan_id: str, payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
-        base_url = str(payload.get("base_url") or "http://localhost:3000")
-        try:
-            return start_background_run(plan_id, str(database_path), base_url)
-        except ValueError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+        raise HTTPException(status_code=405, detail="Runs are started by the connected AI coder through MCP")
 
     @app.get("/api/runs/{run_id}")
     def run_status(run_id: str) -> dict[str, object]:
@@ -133,7 +179,15 @@ def create_app(database_path: Path) -> FastAPI:
         matches = [item for item in RunStore(database_path).evidence(run_id) if item["evidence_id"] == evidence_id]
         if not matches:
             raise HTTPException(status_code=404, detail="evidence not found")
-        path = Path(matches[0]["artifact_path"])
+        artifact_path = str(matches[0]["artifact_path"])
+        filename = Path(artifact_path).name or f"{evidence_id}.bin"
+        media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        disposition = "attachment" if str(matches[0]["kind"]).startswith("report_") else "inline"
+        headers = {"Content-Disposition": f'{disposition}; filename="{filename}"'}
+        if artifact_path.startswith("s3://"):
+            content, stored_media_type = download(artifact_path)
+            return Response(content=content, media_type=media_type or stored_media_type, headers=headers)
+        path = Path(artifact_path)
         try:
             path = path.resolve()
             artifact_root = database_path.expanduser().resolve().parent
@@ -142,7 +196,7 @@ def create_app(database_path: Path) -> FastAPI:
             raise HTTPException(status_code=403, detail="evidence outside artifact root") from None
         if not path.is_file():
             raise HTTPException(status_code=404, detail="artifact file not found")
-        return FileResponse(path)
+        return FileResponse(path, media_type=media_type, headers=headers)
 
     @app.get("/api/runs")
     def runs() -> dict[str, object]:
@@ -219,7 +273,7 @@ def create_app(database_path: Path) -> FastAPI:
                 for event in events:
                     cursor = event["event_id"]
                     yield f"data: {json.dumps(event)}\n\n"
-                if run.status in {"PASS", "FAIL", "BLOCKED", "INCONCLUSIVE", "CANCELLED"}:
+                if run.status in {"PASS", "FAIL", "BLOCKED", "INCONCLUSIVE", "CANCELLED", "ABORTED"}:
                     yield f"event: complete\ndata: {json.dumps(run.model_dump())}\n\n"
                     return
                 time.sleep(0.75)
@@ -244,12 +298,7 @@ def create_app(database_path: Path) -> FastAPI:
 
     @app.post("/api/runs/{run_id}/retry")
     def retry(run_id: str, payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
-        base_url = str(payload.get("base_url") or "http://localhost:3000")
-        try:
-            run = RunStore(database_path).get(run_id)
-            return start_background_run(run.plan_id, str(database_path), base_url)
-        except ValueError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+        raise HTTPException(status_code=405, detail="Runs are retried by the connected AI coder through MCP")
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard() -> str:
@@ -280,7 +329,7 @@ def create_app(database_path: Path) -> FastAPI:
                 <td><span class="row-index">{index:02d}</span><strong>{_esc(plan["name"])}</strong><div class="mono muted">{_esc(plan["plan_id"])}</div></td>
                 <td class="mono">{_esc(plan["environment"])}</td><td class="mono">{plan["case_count"]:02d} cases</td>
                 <td><span class="status {_status_class("PASS" if plan["approved"] else "BLOCKED")}"><i></i>{"APPROVED" if plan["approved"] else "DRAFT"}</span></td>
-                <td><button class="row-action plan-approve" data-plan-id="{_esc(plan["plan_id"])}" {"disabled" if plan["approved"] else ""}>{"Approved" if plan["approved"] else "Approve"}</button><button class="row-action plan-start" data-plan-id="{_esc(plan["plan_id"])}">Start ↗</button></td>
+                <td class="muted">MCP controlled</td>
             </tr>'''
             for index, plan in enumerate(plans_data, start=1)
         ) or '<tr class="empty-row"><td colspan="5">No plans drafted yet. Use Test Studio to create the first plan.</td></tr>'
@@ -387,6 +436,8 @@ document.querySelectorAll('.plan-start').forEach(button => button.addEventListen
   window.location.hash = 'monitor';
   monitorRun(run.run_id);
 }}));
+document.querySelectorAll('.plan-approve,.plan-start').forEach(button => button.remove());
+document.querySelector('#plan-form')?.remove();
 const search = document.querySelector('#dashboard-search');
 search.addEventListener('input', () => {{
   const term = search.value.toLowerCase().trim();

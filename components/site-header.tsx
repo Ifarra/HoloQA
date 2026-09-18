@@ -1,5 +1,4 @@
-import Link from "next/link";
-import { ArrowUpRight, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 
@@ -16,9 +15,6 @@ export function SiteHeader() {
             <span>Search projects, workspaces, or inspections...</span>
             <kbd className="ml-4 border px-1.5 py-0.5 font-mono text-[10px]">⌘ K</kbd>
           </div>
-          <Link href="/projects/new" className="inline-flex h-8 items-center gap-1.5 bg-primary px-3 text-xs font-semibold uppercase tracking-[0.08em] text-primary-foreground hover:bg-primary/90">
-            New inspection <ArrowUpRight className="size-3.5" aria-hidden="true" />
-          </Link>
         </div>
       </div>
     </header>

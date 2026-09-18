@@ -1,11 +1,5 @@
-'use client'
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
-import { FeaturePage } from '@/components/feature-page'
-import { api } from '@/lib/api'
+import Link from "next/link";
 
-export default function NewProject() {
-  const router = useRouter(); const [path, setPath] = useState(''); const [message, setMessage] = useState('')
-  async function submit(event: React.FormEvent) { event.preventDefault(); setMessage('Inspecting workspace and pinning snapshot…'); try { const data = await api<{project_id:string}>('/projects/initialize', {method:'POST', body:JSON.stringify({workspace_root:path})}); setMessage(`${data.project_id} initialized.`); setTimeout(() => router.push(`/projects/${data.project_id}`), 500) } catch (error) { setMessage((error as Error).message) } }
-  return <FeaturePage eyebrow="Project setup / 01" title="INITIALIZE" intro="Create a pinned workspace snapshot before authoring or running quality work."><section className="section grid-2"><form className="panel" onSubmit={submit}><div className="field"><label>Workspace path</label><input value={path} onChange={event => setPath(event.target.value)} placeholder="C:\\workspaces\\checkout" required /></div><div className="actions"><button className="button primary">Initialize workspace ↗</button><button type="button" className="button secondary" onClick={() => router.push('/projects')}>Cancel</button></div><p className="muted">{message}</p></form><div className="panel"><div className="eyebrow">MCP boundary</div><h3>Inspection is explicit.</h3><p className="muted">The API runs the same snapshot and CodeGraph workflow used by MCP, then returns the project record for the web operator.</p></div></section></FeaturePage>
+export default function ProjectSetupRemoved() {
+  return <main className="dashboard"><section className="section"><div className="panel"><div className="eyebrow">MCP-controlled setup</div><h1>PROJECT INITIALIZATION MOVED</h1><p className="muted">Projects are initialized by the connected remote HoloQA MCP server. Mount the application under /workspace on the Docker host, then ask your AI coder to call holoqa_project_inspect and holoqa_initialize_project.</p><Link className="button secondary" href="/create-test">View remote MCP workflow ↗</Link></div></section></main>;
 }

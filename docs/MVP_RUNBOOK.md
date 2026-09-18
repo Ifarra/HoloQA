@@ -62,19 +62,19 @@ Test ID | Title | Steps | Expected Result
 
 Separate multiple steps with semicolons.
 
-## Real browser execution
+## Agent-browser execution
 
-After importing a workbook and creating/approving a plan, call `holoqa_execute_run` with:
+After importing a workbook and creating/approving a plan, call `holoqa_open_run_session` with the approved plan.
 
 ```text
-base_url = http://demo-app:8765
+agent_id = cursor
 ```
 
-The worker runs Chromium inside the HoloQA container and stores screenshots under the configured state volume.
+The connected AI coder runs agent-browser locally against the reachable target, handles recoverable UI changes, and sends ordered events to HoloQA. Use holoqa_prepare_artifact_upload and holoqa_commit_artifact for Garage-backed evidence.
 
 ## MVP limitations
 
 - The demo app is intentionally simple and is included for repeatable validation.
-- The browser runner currently supports semantic execution for the demo user-creation flow; arbitrary workflows need additional action adapters.
-- Authentication, multi-user permissions, remote Streamable HTTP, and GitHub/GitLab OAuth are not included yet.
+- The server does not include Chromium or a browser worker; arbitrary workflows are handled by the connected AI coder through agent-browser.
+- Authentication remains local to the client browser; raw cookies and storage state are never sent to HoloQA.
 - Docker Desktop must be running before `docker compose` commands can be verified.

@@ -33,4 +33,5 @@ def test_run_store_requires_approval(tmp_path: Path):
 
     store.approve(plan.plan_id)
     run = store.execute(plan.plan_id)
-    assert run.status == "PASS"
+    assert run.status == "AGENT_READY"
+    assert "ai coder" in run.message.lower()

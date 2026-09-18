@@ -88,7 +88,7 @@ export default function Settings() {
             configuration, never embedded in a plan.
           </p>
           <div className="callout mono">
-            WORKER / APPROVAL GATED
+            AGENT SESSION / APPROVAL GATED
             <br />
             ARTIFACTS / RETAINED {form.retention} DAYS
             <br />
@@ -98,8 +98,8 @@ export default function Settings() {
             <a href="/reports">
               Review release posture <span>↗</span>
             </a>
-            <a href="/assistant">
-              Ask about configuration <span>↗</span>
+            <a href="/create-test">
+              Create a test guide <span>↗</span>
             </a>
           </div>
         </div>

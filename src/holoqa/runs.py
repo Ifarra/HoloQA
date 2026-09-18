@@ -4,6 +4,7 @@ import json
 import hashlib
 import sqlite3
 import uuid
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,8 @@ class Plan(BaseModel):
     plan_version: str = ""
     environment: str = "local"
     snapshot_id: str | None = None
+    auth_profile_id: str | None = None
+    testcase_set_id: str | None = None
 
 
 class Run(BaseModel):
@@ -26,7 +29,7 @@ class Run(BaseModel):
     plan_id: str
     status: str
     message: str = ""
-    execution_mode: str = "real"
+    execution_mode: str = "agent"
     current_test_id: str | None = None
     current_step: str | None = None
     completed_cases: int = 0
@@ -35,6 +38,10 @@ class Run(BaseModel):
     finished_at: str | None = None
     last_heartbeat: str | None = None
     control_mode: str = "agent"
+    agent_id: str | None = None
+    agent_connected: bool = False
+    last_event_sequence: int = 0
+    cancel_requested: bool = False
 
 
 class RunStore:
@@ -72,12 +79,12 @@ class RunStore:
                 """
             )
             columns = {row[1] for row in db.execute("PRAGMA table_info(plans)")}
-            for name, definition in (("name", "TEXT DEFAULT 'Untitled plan'"), ("plan_version", "TEXT DEFAULT ''"), ("environment", "TEXT DEFAULT 'local'"), ("snapshot_id", "TEXT")):
+            for name, definition in (("name", "TEXT DEFAULT 'Untitled plan'"), ("plan_version", "TEXT DEFAULT ''"), ("environment", "TEXT DEFAULT 'staging'"), ("snapshot_id", "TEXT"), ("auth_profile_id", "TEXT"), ("testcase_set_id", "TEXT")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE plans ADD COLUMN {name} {definition}")
             run_columns = {row[1] for row in db.execute("PRAGMA table_info(runs)")}
             if "execution_mode" not in run_columns:
-                db.execute("ALTER TABLE runs ADD COLUMN execution_mode TEXT DEFAULT 'real'")
+                db.execute("ALTER TABLE runs ADD COLUMN execution_mode TEXT DEFAULT 'agent'")
             if "control_mode" not in run_columns:
                 db.execute("ALTER TABLE runs ADD COLUMN control_mode TEXT DEFAULT 'agent'")
             for name, definition in (
@@ -89,6 +96,10 @@ class RunStore:
                 ("finished_at", "TEXT"),
                 ("last_heartbeat", "TEXT"),
                 ("cancel_requested", "INTEGER DEFAULT 0"),
+                ("agent_id", "TEXT"),
+                ("agent_token", "TEXT"),
+                ("agent_connected", "INTEGER DEFAULT 0"),
+                ("last_event_sequence", "INTEGER DEFAULT 0"),
             ):
                 if name not in run_columns:
                     db.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
@@ -110,8 +121,8 @@ class RunStore:
         run = Run(run_id=f"run_{uuid.uuid4().hex[:12]}", plan_id=plan_id, status="QUEUED" if approved else "BLOCKED", message="Run queued" if approved else "Run requires approval", total_cases=len(plan.cases))
         with sqlite3.connect(self.path) as db:
             db.execute(
-                "INSERT INTO runs(run_id, plan_id, status, message, results, total_cases, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (run.run_id, plan_id, run.status, run.message, "[]", run.total_cases, self._now()),
+                "INSERT INTO runs(run_id, plan_id, status, message, results, execution_mode, total_cases, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (run.run_id, plan_id, run.status, run.message, "[]", "agent", run.total_cases, self._now()),
             )
         self._event(run.run_id, "run_queued" if approved else "run_blocked", status=run.status, message=run.message, payload={"total_cases": run.total_cases})
         return run
@@ -124,8 +135,75 @@ class RunStore:
     def mark_running(self, run_id: str) -> None:
         now = self._now()
         with sqlite3.connect(self.path) as db:
-            db.execute("UPDATE runs SET status='RUNNING', message=?, started_at=COALESCE(started_at, ?), last_heartbeat=? WHERE run_id=?", ("Browser execution started", now, now, run_id))
-        self._event(run_id, "run_started", status="RUNNING", message="Browser execution started")
+            db.execute("UPDATE runs SET status='RUNNING', message=?, started_at=COALESCE(started_at, ?), last_heartbeat=? WHERE run_id=?", ("Agent execution started", now, now, run_id))
+        self._event(run_id, "run_started", status="RUNNING", message="Agent execution started")
+
+    def open_agent_session(self, plan_id: str, agent_id: str) -> tuple[Run, str]:
+        plan = self.get_plan(plan_id)
+        if not plan.approved:
+            raise ValueError("Run requires approval before an agent session can start")
+        run_id = f"run_{uuid.uuid4().hex[:12]}"
+        token = secrets.token_urlsafe(32)
+        now = self._now()
+        run = Run(run_id=run_id, plan_id=plan_id, status="AGENT_CONNECTED", message="AI coder connected", execution_mode="agent", total_cases=len(plan.cases), started_at=now, last_heartbeat=now, agent_id=agent_id, agent_connected=True)
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO runs(run_id, plan_id, status, message, results, execution_mode, total_cases, started_at, last_heartbeat, agent_id, agent_token, agent_connected) VALUES (?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, 1)", (run_id, plan_id, run.status, run.message, run.execution_mode, run.total_cases, now, now, agent_id, token))
+        self._event(run_id, "agent_connected", status=run.status, message=run.message, payload={"agent_id": agent_id})
+        return run, token
+
+    def _authorize_agent(self, run_id: str, token: str) -> None:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT agent_token, status FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        if not row or not row[0] or not secrets.compare_digest(str(row[0]), token):
+            raise ValueError("Invalid or expired agent session")
+        if row[1] in {"PASS", "FAIL", "BLOCKED", "CANCELLED", "ABORTED"}:
+            raise ValueError("Agent session is already closed")
+
+    def authorize_agent(self, run_id: str, token: str) -> None:
+        """Validate a live browser bridge token without exposing token storage."""
+        self._authorize_agent(run_id, token)
+
+    def disconnect_agent(self, run_id: str) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE runs SET agent_connected=0 WHERE run_id=?", (run_id,))
+
+    def heartbeat_agent(self, run_id: str, token: str) -> Run:
+        self._authorize_agent(run_id, token)
+        now = self._now()
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE runs SET agent_connected=1, last_heartbeat=? WHERE run_id=?", (now, run_id))
+        return self.get(run_id)
+
+    def record_agent_event(self, run_id: str, token: str, *, sequence: int, event_type: str, test_id: str | None = None, step: str | None = None, status: str | None = None, message: str = "", payload: dict | None = None) -> Run:
+        self._authorize_agent(run_id, token)
+        if sequence < 1:
+            raise ValueError("event sequence must be a positive integer")
+        now = self._now()
+        with sqlite3.connect(self.path) as db:
+            current = db.execute("SELECT last_event_sequence FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            last = int(current[0] or 0) if current else 0
+            if sequence <= last:
+                return self.get(run_id)
+            if sequence != last + 1:
+                raise ValueError(f"event sequence gap: expected {last + 1}, received {sequence}")
+            next_status = "RUNNING" if event_type in {"case_started", "step_started", "agent_observation", "agent_action", "recovery_started", "recovery_finished"} else None
+            db.execute("UPDATE runs SET status=COALESCE(?, status), current_test_id=?, current_step=?, last_event_sequence=?, last_heartbeat=?, agent_connected=1, message=? WHERE run_id=?", (next_status, test_id, step, sequence, now, message or "Agent activity recorded", run_id))
+            db.execute("INSERT INTO run_events(run_id, event_type, test_id, step, status, message, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (run_id, event_type, test_id, step, status, message, json.dumps(payload or {}), now))
+        return self.get(run_id)
+
+    def record_agent_verdict(self, run_id: str, token: str, *, test_id: str, status: str, message: str, result: dict | None = None) -> Run:
+        if status not in {"PASS", "FAIL", "BLOCKED", "SKIPPED"}:
+            raise ValueError("case status must be PASS, FAIL, BLOCKED, or SKIPPED")
+        self._authorize_agent(run_id, token)
+        now = self._now()
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT results FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            results = json.loads(row[0] or "[]") if row else []
+            results = [item for item in results if item.get("test_id") != test_id]
+            results.append({"test_id": test_id, "status": status, "actual_result": message, **(result or {})})
+            db.execute("UPDATE runs SET results=?, completed_cases=?, current_test_id=?, current_step=NULL, last_heartbeat=?, agent_connected=1, message=? WHERE run_id=?", (json.dumps(results), len(results), test_id, now, message, run_id))
+        self._event(run_id, "case_verdict", test_id=test_id, status=status, message=message, payload=result or {})
+        return self.get(run_id)
 
     def progress(self, run_id: str, *, event_type: str, test_id: str | None = None, step: str | None = None, status: str | None = None, message: str = "", completed_cases: int | None = None, payload: dict | None = None) -> None:
         now = self._now()
@@ -141,6 +219,13 @@ class RunStore:
             exists = db.execute("SELECT 1 FROM evidence WHERE run_id=? AND artifact_path=?", (run_id, artifact_path)).fetchone()
             if not exists:
                 db.execute("INSERT INTO evidence VALUES (?, ?, ?, ?, ?)", (f"evidence_{uuid.uuid4().hex[:12]}", run_id, test_id, artifact_path, kind))
+
+    def record_agent_artifact(self, run_id: str, token: str, test_id: str, artifact_uri: str, kind: str) -> Run:
+        self._authorize_agent(run_id, token)
+        if not artifact_uri.startswith("s3://"):
+            raise ValueError("agent artifacts must be stored in Garage")
+        self.add_evidence(run_id, test_id, artifact_uri, kind)
+        return self.get(run_id)
 
     def request_cancel(self, run_id: str) -> None:
         with sqlite3.connect(self.path) as db:
@@ -175,11 +260,11 @@ class RunStore:
             rows = db.execute("SELECT event_id, run_id, event_type, test_id, step, status, message, payload, created_at FROM run_events WHERE run_id=? AND event_id>? ORDER BY event_id", (run_id, after_id)).fetchall()
         return [{"event_id": r[0], "run_id": r[1], "event_type": r[2], "test_id": r[3], "step": r[4], "status": r[5], "message": r[6], "payload": json.loads(r[7] or "{}"), "created_at": r[8]} for r in rows]
 
-    def create_plan(self, project_id: str, cases: list[dict], environment: str = "local", snapshot_id: str | None = None, name: str = "Untitled plan") -> Plan:
+    def create_plan(self, project_id: str, cases: list[dict], environment: str = "staging", snapshot_id: str | None = None, name: str = "Untitled plan", auth_profile_id: str | None = None, testcase_set_id: str | None = None) -> Plan:
         fingerprint = hashlib.sha256(json.dumps({"project_id": project_id, "cases": cases, "environment": environment, "snapshot_id": snapshot_id}, sort_keys=True).encode()).hexdigest()
-        plan = Plan(plan_id=f"plan_{uuid.uuid4().hex[:12]}", project_id=project_id, cases=cases, name=name, environment=environment, snapshot_id=snapshot_id, plan_version=fingerprint)
+        plan = Plan(plan_id=f"plan_{uuid.uuid4().hex[:12]}", project_id=project_id, cases=cases, name=name, environment=environment, snapshot_id=snapshot_id, plan_version=fingerprint, auth_profile_id=auth_profile_id, testcase_set_id=testcase_set_id)
         with sqlite3.connect(self.path) as db:
-            db.execute("INSERT INTO plans(plan_id, project_id, cases, name, approved, plan_version, environment, snapshot_id) VALUES (?, ?, ?, ?, 0, ?, ?, ?)", (plan.plan_id, project_id, json.dumps(cases), name, fingerprint, environment, snapshot_id))
+            db.execute("INSERT INTO plans(plan_id, project_id, cases, name, approved, plan_version, environment, snapshot_id, auth_profile_id, testcase_set_id) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)", (plan.plan_id, project_id, json.dumps(cases), name, fingerprint, environment, snapshot_id, auth_profile_id, testcase_set_id))
         return plan
 
     def approve(self, plan_id: str) -> None:
@@ -194,25 +279,26 @@ class RunStore:
         if not row:
             raise ValueError(f"plan not found: {plan_id}")
         if not row[0]:
-            run = Run(run_id=f"run_{uuid.uuid4().hex[:12]}", plan_id=plan_id, status="BLOCKED", message="Run requires approval", execution_mode="real")
+            run = Run(run_id=f"run_{uuid.uuid4().hex[:12]}", plan_id=plan_id, status="BLOCKED", message="Run requires approval", execution_mode="agent")
         else:
-            run = Run(run_id=f"run_{uuid.uuid4().hex[:12]}", plan_id=plan_id, status="PASS", message="MVP execution completed", execution_mode="real")
+            run = Run(run_id=f"run_{uuid.uuid4().hex[:12]}", plan_id=plan_id, status="AGENT_READY", message="Waiting for an AI coder session", execution_mode="agent", total_cases=len(self.get_plan(plan_id).cases))
         with sqlite3.connect(self.path) as db:
-            db.execute("INSERT INTO runs(run_id, plan_id, status, message, results, execution_mode) VALUES (?, ?, ?, ?, ?, ?)", (run.run_id, run.plan_id, run.status, run.message, "[]", run.execution_mode))
+            db.execute("INSERT INTO runs(run_id, plan_id, status, message, results, execution_mode, total_cases, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (run.run_id, run.plan_id, run.status, run.message, "[]", run.execution_mode, run.total_cases, self._now()))
+        self._event(run.run_id, "agent_ready" if run.status == "AGENT_READY" else "run_blocked", status=run.status, message=run.message, payload={"total_cases": run.total_cases})
         return run
 
     def get_plan(self, plan_id: str) -> Plan:
         with sqlite3.connect(self.path) as db:
-            row = db.execute("SELECT plan_id, project_id, cases, name, approved, plan_version, environment, snapshot_id FROM plans WHERE plan_id=?", (plan_id,)).fetchone()
+            row = db.execute("SELECT plan_id, project_id, cases, name, approved, plan_version, environment, snapshot_id, auth_profile_id, testcase_set_id FROM plans WHERE plan_id=?", (plan_id,)).fetchone()
         if not row:
             raise ValueError(f"plan not found: {plan_id}")
-        return Plan(plan_id=row[0], project_id=row[1], cases=json.loads(row[2]), name=row[3] or "Untitled plan", approved=bool(row[4]), plan_version=row[5] or "", environment=row[6] or "local", snapshot_id=row[7])
+        return Plan(plan_id=row[0], project_id=row[1], cases=json.loads(row[2]), name=row[3] or "Untitled plan", approved=bool(row[4]), plan_version=row[5] or "", environment=row[6] or "staging", snapshot_id=row[7], auth_profile_id=row[8], testcase_set_id=row[9])
 
     def complete(self, run_id: str, status: str, message: str, results: list[dict], execution_mode: str = "real") -> None:
-        if status not in {"PASS", "FAIL", "BLOCKED", "INCONCLUSIVE"}:
+        if status not in {"PASS", "FAIL", "BLOCKED", "INCONCLUSIVE", "CANCELLED", "ABORTED"}:
             raise ValueError(f"unsupported run status: {status}")
         with sqlite3.connect(self.path) as db:
-            db.execute("UPDATE runs SET status=?, message=?, results=?, execution_mode=?, finished_at=?, last_heartbeat=? WHERE run_id=?", (status, message, json.dumps(results), execution_mode, self._now(), self._now(), run_id))
+            db.execute("UPDATE runs SET status=?, message=?, results=?, execution_mode=?, finished_at=?, last_heartbeat=?, agent_connected=0 WHERE run_id=?", (status, message, json.dumps(results), execution_mode, self._now(), self._now(), run_id))
             for result in results:
                 items = result.get("evidence_items") or [{"path": path, "kind": "screenshot"} for path in str(result.get("evidence", "")).split(";") if path]
                 for item in items:
@@ -269,12 +355,12 @@ class RunStore:
 
     def list_runs(self) -> list[dict[str, str]]:
         with sqlite3.connect(self.path) as db:
-            rows = db.execute("SELECT run_id, plan_id, status, message, current_test_id, current_step, completed_cases, total_cases, started_at, finished_at, last_heartbeat FROM runs ORDER BY rowid DESC").fetchall()
-        return [{"run_id": row[0], "plan_id": row[1], "status": row[2], "message": row[3], "current_test_id": row[4], "current_step": row[5], "completed_cases": row[6] or 0, "total_cases": row[7] or 0, "started_at": row[8], "finished_at": row[9], "last_heartbeat": row[10]} for row in rows]
+            rows = db.execute("SELECT run_id, plan_id, status, message, current_test_id, current_step, completed_cases, total_cases, started_at, finished_at, last_heartbeat, agent_id, agent_connected, last_event_sequence FROM runs ORDER BY rowid DESC").fetchall()
+        return [{"run_id": row[0], "plan_id": row[1], "status": row[2], "message": row[3], "current_test_id": row[4], "current_step": row[5], "completed_cases": row[6] or 0, "total_cases": row[7] or 0, "started_at": row[8], "finished_at": row[9], "last_heartbeat": row[10], "agent_id": row[11], "agent_connected": bool(row[12]), "last_event_sequence": row[13] or 0} for row in rows]
 
     def get(self, run_id: str) -> Run:
         with sqlite3.connect(self.path) as db:
-            row = db.execute("SELECT run_id, plan_id, status, message, execution_mode, current_test_id, current_step, completed_cases, total_cases, started_at, finished_at, last_heartbeat, control_mode FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            row = db.execute("SELECT run_id, plan_id, status, message, execution_mode, current_test_id, current_step, completed_cases, total_cases, started_at, finished_at, last_heartbeat, control_mode, agent_id, agent_connected, last_event_sequence, cancel_requested FROM runs WHERE run_id=?", (run_id,)).fetchone()
         if not row:
             raise ValueError(f"run not found: {run_id}")
-        return Run(run_id=row[0], plan_id=row[1], status=row[2], message=row[3], execution_mode=row[4] or "real", current_test_id=row[5], current_step=row[6], completed_cases=row[7] or 0, total_cases=row[8] or 0, started_at=row[9], finished_at=row[10], last_heartbeat=row[11], control_mode=row[12] or "agent")
+        return Run(run_id=row[0], plan_id=row[1], status=row[2], message=row[3], execution_mode=row[4] or "agent", current_test_id=row[5], current_step=row[6], completed_cases=row[7] or 0, total_cases=row[8] or 0, started_at=row[9], finished_at=row[10], last_heartbeat=row[11], control_mode=row[12] or "agent", agent_id=row[13], agent_connected=bool(row[14]), last_event_sequence=row[15] or 0, cancel_requested=bool(row[16]))

@@ -1,272 +1,286 @@
----
-version: alpha
-name: HoloQA Control Surface
-description: Light-mode operational Web3-inspired design system for HoloQA's MCP-first SIT/UAT platform.
-colors:
-  primary: "#161616"
-  canvas: "#E7E7E4"
-  surface: "#F3F3F0"
-  paper: "#FBFBF8"
-  ink: "#161616"
-  muted: "#777773"
-  line: "#C9C9C4"
-  accent: "#FF6327"
-  success: "#2D8B62"
-  warning: "#B67920"
-  danger: "#B83B2E"
-  white: "#FFFFFF"
-typography:
-  display:
-    fontFamily: "Space Grotesk, Segoe UI, sans-serif"
-    fontSize: "8.625rem"
-    fontWeight: 900
-    lineHeight: 0.82
-    letterSpacing: "-0.085em"
-  heading-lg:
-    fontFamily: "Space Grotesk, Segoe UI, sans-serif"
-    fontSize: "1.875rem"
-    fontWeight: 700
-    lineHeight: 1.05
-    letterSpacing: "-0.06em"
-  heading-md:
-    fontFamily: "Space Grotesk, Segoe UI, sans-serif"
-    fontSize: "1.4375rem"
-    fontWeight: 700
-    lineHeight: 1.1
-    letterSpacing: "-0.05em"
-  body:
-    fontFamily: "IBM Plex Sans, Segoe UI, sans-serif"
-    fontSize: "0.8125rem"
-    fontWeight: 400
-    lineHeight: 1.5
-  label:
-    fontFamily: "IBM Plex Sans, Segoe UI, sans-serif"
-    fontSize: "0.625rem"
-    fontWeight: 700
-    lineHeight: 1.2
-    letterSpacing: "0.14em"
-  mono:
-    fontFamily: "IBM Plex Mono, Consolas, monospace"
-    fontSize: "0.6875rem"
-    fontWeight: 400
-    lineHeight: 1.4
-spacing:
-  1: "4px"
-  2: "8px"
-  3: "12px"
-  4: "16px"
-  5: "20px"
-  6: "24px"
-  7: "32px"
-  8: "48px"
-  9: "64px"
-rounded:
-  none: "0px"
-  sm: "2px"
-  md: "4px"
-  shell: "18px"
-  pill: "999px"
-components:
-  shell:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.shell}"
-    padding: "{spacing.6}"
-  canvas-grid:
-    backgroundColor: "{colors.canvas}"
-    textColor: "{colors.ink}"
-  divider:
-    backgroundColor: "{colors.line}"
-    textColor: "{colors.ink}"
-  card:
-    backgroundColor: "{colors.paper}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.md}"
-    padding: "{spacing.4}"
-  button-primary:
-    backgroundColor: "{colors.accent}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.sm}"
-    padding: "12px 15px"
-  button-primary-hover:
-    backgroundColor: "{colors.ink}"
-    textColor: "{colors.white}"
-  button-secondary:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.sm}"
-    padding: "12px 15px"
-  button-secondary-hover:
-    backgroundColor: "{colors.accent}"
-    textColor: "{colors.ink}"
-  tab-active:
-    backgroundColor: "{colors.ink}"
-    textColor: "{colors.white}"
-    rounded: "{rounded.none}"
-    padding: "9px 12px"
-  tab-default:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.none}"
-    padding: "9px 12px"
-  status-success:
-    backgroundColor: "{colors.paper}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.pill}"
-    padding: "4px 8px"
-  status-warning:
-    backgroundColor: "{colors.paper}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.pill}"
-    padding: "4px 8px"
-  status-danger:
-    backgroundColor: "{colors.paper}"
-    textColor: "{colors.danger}"
-    rounded: "{rounded.pill}"
-    padding: "4px 8px"
-  input:
-    backgroundColor: "{colors.paper}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.none}"
-    padding: "9px 12px"
----
+# HoloQA — design
 
-## Overview
+> Supersedes `ARCHITECTURE.md`, `PRODUCT_PLAN.md`, and `MILESTONES.md`.
+> Those describe a server-hosted platform that is being removed.
 
-HoloQA uses a **light-mode operational control surface**: editorial structure, technical labels, visible alignment, and evidence-focused data density. The visual language is inspired by mature Web3 portfolio interfaces without copying a specific brand.
+## What HoloQA is
 
-The primary surface archetype is **Monitor / Operate**. Users need to understand state quickly, inspect records, and move into an approved action. Do not use marketing-hero composition inside operational screens.
+A **local stdio MCP server** that turns a checked-in test plan into an
+evidence-backed release checklist. The AI client drives the browser through
+HoloQA; HoloQA captures the evidence, evaluates the plan's assertions, and
+computes the verdict.
 
-The system should feel:
+HoloQA contains no intelligence. It runs subprocesses, hashes files, matches
+JSON, and writes a ZIP. Every judgement it makes is a comparison against a spec
+a human wrote.
 
-- Precise rather than decorative.
-- Technical rather than cyberpunk.
-- Institutional but not corporate-generic.
-- Calm at rest, decisive at the point of action.
+**Prior art:** `automated-pentest-platform/scripts/e2e-checklist/` — a working
+31-step release checklist runner for Wolvesight. HoloQA generalizes it. Its
+guardrails, verdict semantics, known-behaviour registry, and ZIP deliverable are
+preserved deliberately; they were learned the expensive way.
 
-## Colors
+## The one property that matters
 
-- **Canvas (`#E7E7E4`)** is the outer workspace and carries the low-contrast blueprint grid.
-- **Surface (`#F3F3F0`)** is the application frame.
-- **Paper (`#FBFBF8`)** is reserved for readable content surfaces such as tables and cards.
-- **Ink (`#161616`)** is the primary text, border, and active-control color.
-- **Muted (`#777773`)** is secondary metadata. Do not use it for essential content below accessible contrast requirements.
-- **Line (`#C9C9C4`)** separates modules without adding shadows.
-- **Accent (`#FF6327`)** is the sole high-energy accent. Use it for primary actions, active emphasis, indexes, and directional affordances.
-- **Success, warning, and danger** communicate run state. Never rely on color alone; pair each state with text and, where useful, a small status dot.
+> **The agent cannot write a passing verdict.**
 
-Use one accent color per surface. Do not introduce gradients, neon glows, rainbow status colors, or arbitrary product-specific accents without extending this system deliberately.
+The agent decides *what* to look at and writes the prose. HoloQA performs the
+capture, owns the bytes, and derives PASS/FAIL from the plan. `BLOCKED` is the
+only verdict the agent may assert, and it requires a written cause.
 
-## Typography
+This is the single upgrade over the prior tool, whose `record.mjs` guardrail is
+presence-based: it requires *a file*, not a file that supports the claim.
 
-Use Space Grotesk for display and headings when available, with Segoe UI as the Windows fallback. Use IBM Plex Sans for interface copy and IBM Plex Mono for IDs, timestamps, run states, and technical values.
+## Boundary
 
-Rules:
+```
+Claude Code / Cursor        the AI. Already paid for. Reads pages, decides
+        |                   what to click, writes notes, cites KB entries.
+        | MCP (stdio, local, no auth, no network)
+        v
+    HoloQA                  zero intelligence. Subprocess + hash + match.
+        |                   Never makes a model call.
+        | subprocess / fetch
+        v
+  agent-browser             deterministic CLI (Playwright underneath).
+```
 
-- Reserve `display` for one primary page identity or control-surface title.
-- Use sentence case for explanatory copy and uppercase only for labels, navigation metadata, and statuses.
-- Use tight negative tracking only for large headings; body and labels must remain legible.
-- Never use the display style for paragraphs, form labels, or critical instructions.
-- Numeric values and identifiers should be aligned and rendered with the mono style where comparison matters.
+No API key. No provider config. No server, no Docker, no database, no port.
+Install is one MCP entry plus `agent-browser` on PATH:
 
-## Layout
+```jsonc
+{ "mcpServers": { "holoqa": { "command": "uvx", "args": ["holoqa"] } } }
+```
 
-Use a centered application shell with a maximum width of `1400px`, `18px` outer padding, and a `3px` ink frame on desktop. The shell becomes edge-to-edge on small screens.
+## The plan file
 
-Use an 8px rhythm based on the spacing tokens:
+One YAML file per application, committed beside the code. This is the only
+per-app artifact; the tool itself is never edited.
 
-- `4px` micro separation.
-- `8–12px` icon, label, and control internals.
-- `16–24px` component padding and table rhythm.
-- `32px` section separation.
-- `48–64px` hero or major composition separation.
+```yaml
+meta:
+  app: wolvesight
+  base_url: ${STAGING_URL}
+  language: id                 # language for generated notes and report
+  workbook: ./Checklist_E2E_Staging.xlsx   # optional output template
 
-Operational screens should use explicit grids, aligned columns, and thin dividers. Prefer CSS Grid for page composition and tables for comparable records. Avoid equal-weight feature-card grids when the user is monitoring or operating a system.
+known_behaviors:
+  - id: KB-001
+    title: SSE putus ~6s pada scan yang sudah selesai
+    applies_to: [A5]
+    verdict_hint: not_a_failure
 
-Responsive rules:
+stages:
+  - id: A
+    title: Mulai scan
 
-- Desktop: two-column featured modules and full navigation.
-- Tablet: reduce gutters and allow controls to wrap.
-- Mobile: stack featured modules, use one-column records, preserve 44px minimum hit targets, and allow horizontal overflow for genuinely tabular data.
+steps:
+  - id: A3
+    stage: A
+    title: Buat scan blackbox profil Standard
+    depends_on: [A2]
+    route: /new
+    do: Pilih mode blackbox, profil Standard, submit.
+    expect:
+      - api:  { method: POST, path: /api/scans, status: 201 }
+      - json: { scan_profile_id: 2, status: PENDING }
+      - capture: { scan_id: $.id }
+      - screenshot: required
+    blocked_if: preflight blockers non-empty
+```
 
-## Elevation & Depth
+`capture:` binds a value for later steps (`{scan_id}` interpolates into any
+later `path`). This replaces the prior tool's manual `--id scan_id=<id>` and
+turns the step ordering that `checklist-map.md` describes in prose into
+something the tool enforces.
 
-Depth comes from borders, surface changes, and the outer frame—not floating shadows.
+## Assertion set — closed
 
-- Use `1px` line borders for internal divisions.
-- Use a `2px` ink rule above major data tables.
-- Use the shell's `3px` ink frame to establish the application boundary.
-- Avoid card shadows except for a restrained shell offset or an explicitly elevated modal.
-- Do not use glassmorphism, blur, or translucent panels as default treatments.
+Deliberately small. HoloQA is not a general browser-automation engine; that
+ambition is what produced the previous `browser_runner.py`.
 
-The blueprint grid is a background texture only. It must remain lower contrast than content borders and must never reduce text readability.
+| Kind | Evaluates |
+| --- | --- |
+| `url_contains` / `url_matches` | captured URL |
+| `text_contains` / `text_not_contains` | captured visible page text |
+| `api` | method + path + status of a captured response |
+| `json` | subset match or JSONPath predicate against a captured body |
+| `screenshot` | `required` — a non-empty image exists for this step |
+| `changed` | two captures of the same target, taken apart, must differ |
+| `capture` | bind `$.path` from a body into the run's variable table |
 
-## Shapes
+`changed` encodes a rule the prior tool enforced socially — *"Langkah yang
+menguji perubahan (5, 13, 23) butuh dua bukti berjarak. Satu tangkapan tidak
+membuktikan apa pun."* Now it cannot be skipped.
 
-The outer application frame is rounded (`18px`) to feel like a contained product environment. Internal cards, tables, inputs, and tabs are square or lightly rounded (`0–4px`). This contrast is intentional.
+Anything not expressible here is `BLOCKED` with a cause, never a soft pass.
 
-Use pill shapes only for compact statuses or tags. Do not turn every control into a pill.
+## Verdicts
 
-Decorative marks—crosses, plus signs, arrows, and index numbers—are allowed as sparse navigation cues. They must not replace labels or accessible names.
+| Verdict | Meaning | Who may assert it |
+| --- | --- | --- |
+| `PASS` | every assertion satisfied against HoloQA's own captures | HoloQA only |
+| `FAIL` | ran, and an assertion was violated | HoloQA only |
+| `BLOCKED` | could not run or could not be verified | agent, with a cause |
 
-## Components
+Carried over verbatim from `conventions.md`: **when torn between PASS and
+BLOCKED, choose BLOCKED.** A checklist that is too loose is more dangerous than
+one that is too strict — the document exists to hold back a release.
 
-### Navigation
+## Run directory
 
-Use a shallow top bar with a brand anchor, parent/back navigation, section links, and one emphasized action. Navigation links are small and uppercase with generous spacing. The primary action uses the accent color but should not dominate the entire header.
+Plain files. No database. Inspectable, git-diffable, and already the shape of
+the deliverable.
 
-### Hero / control-surface identity
+```
+.holoqa/
+  runs/20260918-1430-staging/
+    run.json          steps, verdicts, notes, evidence index, revisions
+    vars.json         captured bindings (scan_id, finding_id, ...)
+    evidence/
+      step-A3-scans.json        sha256 recorded in run.json
+      step-A3-scans.png
+    out/
+      Checklist.xlsx            filled from run.json
+      report.md
+      run-20260918-1430.zip     the deliverable
+  history.jsonl       one line per completed run, for regression comparison
+```
 
-An operational title may be large and editorial, but it must be followed by a concise explanation of what the operator can do. Pair the title with live counts or system state—not invented marketing claims.
+Dropping SQLite deletes `runs.py` (366 lines) and `project_store.py` (185) and
+removes the lost-update races in `record_agent_verdict` and `record_agent_event`
+structurally rather than by locking.
 
-### Tables and ledgers
+## MCP tools — 10
 
-Use tables for projects, runs, evidence, and comparable records. Columns should have clear uppercase labels, stable alignment, and a final directional link or inspect action. Empty states must be explicit and useful, for example: `No runs executed yet.`
+Down from 18, with the browser-execution and live-monitoring surfaces gone.
 
-### Search and filters
+| Tool | Purpose |
+| --- | --- |
+| `holoqa_plan_validate` | lint a plan file; no execution |
+| `holoqa_run_start` | create run dir from a plan + meta (tag, commit, tester) |
+| `holoqa_run_status` | current step, what is blocked, what remains |
+| `holoqa_observe` | **HoloQA** captures: screenshot / api / sse / dom / download |
+| `holoqa_judge` | evaluate a step's assertions against captures; returns verdict |
+| `holoqa_block` | assert BLOCKED with a required cause |
+| `holoqa_note` | attach a note, optionally citing a KB id |
+| `holoqa_kb_add` | record a known behaviour discovered mid-run |
+| `holoqa_run_package` | validate -> fill -> verify -> zip |
+| `holoqa_run_compare` | diff against last green run: new failures, flaky steps |
 
-Use compact rectangular segmented tabs with a dark active state. Search inputs use paper surfaces, thin line borders, and visible focus treatment in accent orange. Search should filter visible records without changing the page composition.
+Note the absence of any tool that accepts a `status` argument.
 
-### Status
+## Guardrails
 
-Supported semantic states are `PASS`, `FAIL`, `BLOCKED`, and `INCONCLUSIVE`. Render the state as text plus a dot or icon. Use green for pass, orange/red for failure, amber for blocked, and muted/neutral treatment for inconclusive. Never silently map blocked or inconclusive to pass.
+Ported from `record.mjs`, which states them plainly: *"sengaja keras, jangan
+dilonggarkan."*
 
-### Buttons and links
+1. `PASS` requires at least one evidence file that exists on disk and is non-empty.
+2. `FAIL` / `BLOCKED` require a written cause.
+3. Verdicts outside the three are rejected.
+4. An evidence reference pointing at a missing file is rejected.
+5. A changed verdict appends to `step.revisions` with the superseded note.
+6. Sensitive headers (`cookie|authorization|token|secret|password|set-cookie`)
+   are redacted in evidence. The ZIP gets shared.
 
-Use the accent-filled primary button once per local composition whenever possible. Secondary actions are outlined or paper-surface controls. Directional row links may use `↗`, but every icon-only control requires an accessible label.
+New:
 
-### Metrics
+7. A step whose `depends_on` is unsatisfied cannot be judged.
+8. A KB citation must reference a KB id that exists in the plan.
+9. An assertion referencing an uncaptured observation yields `BLOCKED`, not `FAIL`.
+10. `holoqa selftest` exercises every guardrail against fixtures — the role
+    `dry-run.mjs` plays today, and it must stay runnable with no staging.
 
-Metrics should answer an operational question: count, freshness, pass rate, evidence quantity, or execution state. Keep values compact and labels small. Do not fill empty space with arbitrary numbers.
+## Modules
 
-### Empty, loading, and error states
+```
+src/holoqa/
+  mcp.py        stdio server, 10 tool definitions             ~200
+  plan.py       load, validate, interpolate bindings          ~180
+  verdict.py    assertion set + evaluator     <- the heart    ~220
+  observe.py    agent-browser + cookied fetch wrappers        ~260
+  run.py        run dir, run.json, evidence, revisions        ~200
+  report.py     xlsx fill (XML surgery) + md + zip            ~200
+  history.py    history.jsonl, compare to last green          ~120
+```
 
-Empty states preserve the same table or panel geometry and explain the next action. Loading states should preserve layout to avoid shifts. Errors must identify the affected operation and offer a recovery path; do not use decorative red banners without actionable context.
+~1,400 lines. Dependencies: `mcp`, `pydantic`, `pyyaml`, `openpyxl`. No boto3,
+no fastapi, no uvicorn, no websockets.
 
-## Do's and Don'ts
+### Ported, not rewritten
 
-### Do
+| From | To | Why |
+| --- | --- | --- |
+| `browser_runner.py::_evaluate_expected` | `verdict.py` | the `PASS_IF` DSL already works; it was dead only because the worker around it was deleted |
+| `checklist.py` XLSX XML surgery | `report.py` | preserves styles, merges, dropdowns, formulas; an `openpyxl` round-trip destroys them |
+| `record.mjs` guardrails | `run.py` | six rules, proven in production |
+| `lib/common.mjs::redactHeaders` | `observe.py` | the regex is right |
+| `session.mjs` expiry detection | `observe.py` | the 80-minute backend token inside a 24-hour cookie degrades silently into empty data — it must stay a first-class hazard |
 
-- Use one monochrome base plus orange action emphasis.
-- Keep important information aligned to a visible grid.
-- Use thin borders and surface contrast instead of heavy shadows.
-- Make project, run, and evidence identifiers easy to scan.
-- Preserve responsive behavior and keyboard focus states.
-- Escape dynamic data before injecting it into HTML.
-- Define new components by purpose and state, not by visual novelty.
+**Windows note:** `agent-browser` is a `.cmd` shim; since Node 20 it needs a
+shell, and `runAgentBrowser` guards arguments containing `"` or `%`. Python's
+`subprocess` hits the same wall. Port the guard, do not rediscover it.
 
-### Don't
+## Deleted
 
-- Do not use blue/purple SaaS gradients or crypto-neon effects.
-- Do not use a centered marketing hero as the default dashboard layout.
-- Do not make every item a large rounded card.
-- Do not use tiny gray text for required instructions or critical statuses.
-- Do not rely on color alone for pass/fail/blocked state.
-- Do not invent metrics, customer claims, or activity to make a screen look populated.
-- Do not add a new color or radius without documenting its semantic role here.
+Docker Compose (3 files), Dockerfiles (4), Garage and `deploy/garage.toml`,
+boto3 and all S3/presigned-URL code, the Next.js app (30+ files, 25 npm deps),
+the 486-line HTML dashboard in `dashboard.py`, the FastAPI service, WebSocket
+live view, `scripts/holoqa_agent_bridge.mjs`, SSE streaming, findings triage,
+environments CRUD, requirements CRUD, control-mode / human-takeover,
+`demo_app.py`, `codegraph.py`, `execution_service.py`, `project_store.py`,
+`runs.py`, and the legacy `legacy_state_database` / `.db`-sniffing parameters.
 
-## Implementation notes
+## Build order
 
-The current dashboard implements these tokens as CSS custom properties in `src/holoqa/dashboard.py`. Future screens should reuse the same names and values rather than introducing local replacements. If the UI grows beyond inline HTML, extract the variables into a shared stylesheet while preserving the token names above.
+**M0 — spine.** Plan loader, run dir, `holoqa_run_start` / `observe`
+(screenshot only) / `judge` (screenshot-required only) / `run_status`.
+Guardrails 1–5. `holoqa selftest`.
+*Exit: one real step passes and one is correctly blocked.*
 
-When extending the system, update this file first, then update the shared implementation and visual regression coverage in the same change.
+**M1 — assertions.** Full closed set, bindings, `changed`, `depends_on`.
+*Exit: a PASS is impossible without a satisfied assertion.*
+
+**M2 — capture breadth.** `api` (cookied fetch + redaction), `sse`, `dom` via
+the Radix-safe driver, `download` via blob interception, session expiry
+detection. *Exit: every capture kind the prior tool supported.*
+
+**M3 — deliverable.** XLSX fill by XML surgery, a `verify_xlsx` equivalent,
+markdown report, ZIP packaging, KB registry.
+*Exit: a ZIP indistinguishable in usefulness from the prior tool's.*
+
+**M4 — memory.** `history.jsonl`, `run_compare`, flaky-step detection.
+*Exit: "what regressed since the last green run?" answered in one call.*
+
+**M5 — proof of generality.** Port all 31 Wolvesight steps to
+`wolvesight.plan.yaml` and run them against staging.
+*Exit: results match a manual run, with no tool source edited.*
+
+M5 is the real test. If the 31 steps do not express cleanly in the spec, the
+spec is wrong — and we learn it in week one rather than month three.
+
+## Done means better than e2e-checklist
+
+1. Runs against a second application with no tool source change — plan file only.
+2. The agent cannot write PASS. Verified by a selftest that tries.
+3. Every prior guardrail still holds (evidence required, cause required,
+   revision trail, redaction).
+4. Assertions are machine-checked, not prose a human reads.
+5. Cross-run regression comparison exists.
+6. The deliverable is still a ZIP with a filled workbook and hyperlinked evidence.
+7. `holoqa selftest` runs green with no staging and no network.
+
+Anything less is a lateral move.
+
+## Risks
+
+**The spec cannot express a step.** Most likely on multi-page flows and timing
+windows — the prior notes record that the enrichment window in step 12 is only
+seconds wide. Mitigation: `BLOCKED` is always available, and M5 surfaces this
+early. Do not respond by widening the assertion set into a scripting language.
+
+**Capture-through-HoloQA is slower to iterate** than the agent calling
+`agent-browser` directly. Mitigation: `holoqa_observe` takes a raw passthrough
+mode for exploration, which never produces evidence and never feeds a verdict.
+
+**The XLSX template is still per-app.** M3 keeps HoloQA's own markdown/JSON
+report as the default and treats a workbook as an optional, configured output.

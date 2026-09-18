@@ -13,9 +13,10 @@ dependencies = [
   "pydantic>=2.0.0",
   "fastapi>=0.115.0",
   "uvicorn>=0.30.0",
+  "websockets>=13.0",
   "openpyxl>=3.1.0",
-  "playwright>=1.50.0",
   "python-multipart>=0.0.9",
+  "boto3>=1.35.0",
 ]
 
 [dependency-groups]

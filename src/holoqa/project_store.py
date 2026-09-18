@@ -57,6 +57,12 @@ class ProjectStore:
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(project_id) REFERENCES projects(project_id)
                 );
+                CREATE TABLE IF NOT EXISTS testcases (
+                    testcase_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, testcase_set_id TEXT NOT NULL,
+                    test_id TEXT NOT NULL, title TEXT NOT NULL, steps TEXT NOT NULL, expected_result TEXT NOT NULL,
+                    source TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+                );
                 """
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(snapshots)")}
@@ -151,6 +157,23 @@ class ProjectStore:
                 query += " WHERE project_id=?"; args = (project_id,)
             rows = connection.execute(query + " ORDER BY created_at DESC", args).fetchall()
         return [{**dict(row), "key": row[2], "test_ids": json.loads(row[7] or "[]")} for row in rows]
+
+    def import_cases(self, project_id: str, cases: list[dict], source: Path) -> dict[str, object]:
+        with self._connect() as connection:
+            if not connection.execute("SELECT 1 FROM projects WHERE project_id=?", (project_id,)).fetchone():
+                raise ValueError(f"project not found: {project_id}")
+            testcase_set_id = f"set_{uuid.uuid4().hex[:12]}"
+            for case in cases:
+                connection.execute(
+                    "INSERT INTO testcases(testcase_id, project_id, testcase_set_id, test_id, title, steps, expected_result, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (f"tc_{uuid.uuid4().hex[:12]}", project_id, testcase_set_id, str(case.get("test_id") or ""), str(case.get("title") or ""), json.dumps(case.get("steps") or []), str(case.get("expected_result") or ""), str(source.resolve())),
+                )
+        return {"testcase_set_id": testcase_set_id, "project_id": project_id, "case_count": len(cases)}
+
+    def testcases(self, project_id: str) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT testcase_id, testcase_set_id, test_id, title, steps, expected_result, source, created_at FROM testcases WHERE project_id=? ORDER BY rowid", (project_id,)).fetchall()
+        return [{"testcase_id": r[0], "testcase_set_id": r[1], "test_id": r[2], "title": r[3], "steps": json.loads(r[4] or "[]"), "expected_result": r[5], "source": r[6], "created_at": r[7]} for r in rows]
 
     def create_requirement(self, payload: dict[str, object]) -> dict[str, object]:
         project_id, title = str(payload.get("project_id") or ""), str(payload.get("title") or "")

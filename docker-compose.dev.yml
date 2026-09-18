@@ -7,6 +7,14 @@ services:
     command: ["sh", "-c", "uv sync --dev && uv run uvicorn holoqa.dashboard:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/src"]
     environment:
       HOLOQA_STATE: /data/.holoqa/state.db
+      HOLOQA_REMOTE_ONLY: "1"
+      HOLOQA_OBJECT_STORAGE: s3
+      HOLOQA_S3_ENDPOINT: http://garage:3900
+      HOLOQA_S3_PUBLIC_ENDPOINT: ${HOLOQA_S3_PUBLIC_ENDPOINT:-http://localhost:3900}
+      HOLOQA_S3_REGION: garage
+      HOLOQA_S3_BUCKET: holoqa-artifacts
+      HOLOQA_S3_ACCESS_KEY_ID: ${HOLOQA_S3_ACCESS_KEY_ID:-GKholoqa}
+      HOLOQA_S3_SECRET_ACCESS_KEY: ${HOLOQA_S3_SECRET_ACCESS_KEY:-change-me-in-production}
       PYTHONPATH: /app/src
     ports:
       - "8000:8000"
@@ -40,6 +48,28 @@ services:
       timeout: 3s
       retries: 12
 
+  garage:
+    image: dxflrs/garage:v2.3.0
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_DEFAULT_BUCKET: holoqa-artifacts
+      GARAGE_DEFAULT_ACCESS_KEY: ${HOLOQA_S3_ACCESS_KEY_ID:-GKholoqa}
+      GARAGE_DEFAULT_SECRET_KEY: ${HOLOQA_S3_SECRET_ACCESS_KEY:-change-me-in-production}
+    volumes:
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+      - ./deploy/garage.toml:/etc/garage.toml:ro
+    expose:
+      - "3900"
+    ports:
+      - "3900:3900"
+    healthcheck:
+      test: ["CMD", "/garage", "-c", "/etc/garage.toml", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   web:
     build:
       context: .
@@ -48,6 +78,7 @@ services:
     command: ["npm", "run", "dev", "--", "-H", "0.0.0.0", "-p", "3001"]
     environment:
       HOLOQA_API_URL: http://holoqa:8000
+      NEXT_PUBLIC_HOLOQA_API_URL: ${NEXT_PUBLIC_HOLOQA_API_URL:-http://localhost:8000}
       WATCHPACK_POLLING: "true"
     ports:
       - "3001:3001"
@@ -59,24 +90,43 @@ services:
       holoqa:
         condition: service_healthy
 
-  mcp:
+  mcp-http:
     build:
       context: .
       dockerfile: Dockerfile.dev
     working_dir: /app
-    command: ["uv", "run", "--no-sync", "holoqa-mcp"]
+    command: ["sh", "-c", "uv sync --dev && uv run --no-sync holoqa-mcp"]
     environment:
       HOLOQA_STATE: /data/.holoqa/state.db
+      HOLOQA_MCP_TRANSPORT: streamable-http
+      HOLOQA_PUBLIC_DASHBOARD_URL: ${HOLOQA_PUBLIC_DASHBOARD_URL:-http://localhost:8000}
+      HOLOQA_MCP_HOST: 0.0.0.0
+      HOLOQA_MCP_PORT: 8100
+      HOLOQA_MCP_PATH: /mcp
+      HOLOQA_REMOTE_ONLY: "1"
+      HOLOQA_OBJECT_STORAGE: s3
+      HOLOQA_S3_ENDPOINT: http://garage:3900
+      HOLOQA_S3_PUBLIC_ENDPOINT: ${HOLOQA_S3_PUBLIC_ENDPOINT:-http://localhost:3900}
+      HOLOQA_S3_REGION: garage
+      HOLOQA_S3_BUCKET: holoqa-artifacts
+      HOLOQA_S3_ACCESS_KEY_ID: ${HOLOQA_S3_ACCESS_KEY_ID:-GKholoqa}
+      HOLOQA_S3_SECRET_ACCESS_KEY: ${HOLOQA_S3_SECRET_ACCESS_KEY:-change-me-in-production}
       PYTHONPATH: /app/src
-    stdin_open: true
+    ports:
+      - "8100:8100"
     volumes:
       - .:/app
       - holoqa-dev-venv:/app/.venv
       - holoqa-data:/data
       - ./workspace:/workspace
+    depends_on:
+      garage:
+        condition: service_healthy
 
 volumes:
   holoqa-dev-venv:
   holoqa-data:
   holoqa-web-node-modules:
   holoqa-web-next:
+  garage-meta:
+  garage-data:

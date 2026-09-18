@@ -2,25 +2,15 @@
 
 import * as React from "react";
 import {
-  ArrowUpCircleIcon,
   BarChartIcon,
-  CameraIcon,
-  ClipboardListIcon,
-  DatabaseIcon,
-  FileCodeIcon,
-  FileIcon,
-  FileTextIcon,
   FolderIcon,
-  HelpCircleIcon,
   LayoutDashboardIcon,
   ListIcon,
-  SearchIcon,
   SettingsIcon,
   UsersIcon,
   PlusIcon,
 } from "lucide-react";
 
-import { NavDocuments } from "@/components/nav-documents";
 import { NavMain } from "@/components/nav-main";
 import { NavSecondary } from "@/components/nav-secondary";
 import { NavUser } from "@/components/nav-user";
@@ -67,87 +57,14 @@ const data = {
       icon: UsersIcon,
     },
   ],
-  navClouds: [
-    {
-      title: "Requirements",
-      icon: CameraIcon,
-      isActive: true,
-      url: "#",
-      items: [
-        {
-          title: "Active Proposals",
-          url: "#",
-        },
-        {
-          title: "Archived",
-          url: "#",
-        },
-      ],
-    },
-    {
-      title: "Assistant",
-      icon: FileTextIcon,
-      url: "#",
-      items: [
-        {
-          title: "Active Proposals",
-          url: "#",
-        },
-        {
-          title: "Archived",
-          url: "#",
-        },
-      ],
-    },
-    {
-      title: "Settings",
-      icon: FileCodeIcon,
-      url: "#",
-      items: [
-        {
-          title: "Active Proposals",
-          url: "#",
-        },
-        {
-          title: "Archived",
-          url: "#",
-        },
-      ],
-    },
-  ],
   navSecondary: [
     {
       title: "Settings",
       url: "/settings",
       icon: SettingsIcon,
     },
-    {
-      title: "Get Help",
-      url: "/assistant",
-      icon: HelpCircleIcon,
-    },
-    {
-      title: "Search",
-      url: "/projects",
-      icon: SearchIcon,
-    },
   ],
   documents: [
-    {
-      name: "Requirements",
-      url: "/requirements",
-      icon: DatabaseIcon,
-    },
-    {
-      name: "Reports",
-      url: "/reports",
-      icon: ClipboardListIcon,
-    },
-    {
-      name: "Assistant",
-      url: "/assistant",
-      icon: FileIcon,
-    },
   ],
 };
 
@@ -175,7 +92,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       </SidebarHeader>
       <SidebarContent>
         <NavMain items={data.navMain} />
-        <NavDocuments items={data.documents} />
         <NavSecondary items={data.navSecondary} className="mt-auto" />
       </SidebarContent>
       <SidebarFooter>
