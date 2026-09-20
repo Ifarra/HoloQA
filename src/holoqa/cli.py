@@ -21,6 +21,8 @@ from holoqa import BLOCKED, FAIL, PASS, __version__
 from holoqa import plan as plan_module
 from holoqa import run as run_module
 from holoqa import verdict as verdict_module
+from holoqa import agent as agent_module
+from holoqa import report as report_module
 from holoqa.observe import REDACT_KEYS, redact
 from holoqa.run import GuardrailError, Run
 
@@ -299,6 +301,145 @@ def doctor() -> int:
     return 0 if ok else 1
 
 
+def _print_agent(value: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(value, indent=2))
+        return
+    if "providers" in value:
+        for item in value["providers"]:
+            state = item["version"] if item["installed"] else "MISSING"
+            print(f"{item['provider']:<10} {state}")
+        return
+    agent = value.get("agent", {})
+    holoqa = value.get("holoqa", {})
+    if agent:
+        print(f"agent: {agent.get('provider', 'unknown')} {agent.get('state', 'unknown')} "
+              f"(exit {agent.get('exit_code', 'running')})")
+    print(f"holoqa: {holoqa.get('decision', 'UNKNOWN')}  counts={holoqa.get('counts', {})}")
+    if holoqa.get("next_step"):
+        print(f"next step: {holoqa['next_step']}")
+
+
+def agent_command(args: argparse.Namespace) -> int:
+    """Own the provider-neutral CLI contract for coding-agent execution."""
+    if args.agent_command == "providers":
+        _print_agent({"providers": [agent_module.provider_info(name) for name in agent_module.PROVIDERS]}, args.json)
+        return 0
+    if args.agent_command == "doctor":
+        names = [args.provider] if args.provider else list(agent_module.PROVIDERS)
+        details = [agent_module.provider_info(name) for name in names]
+        browser = shutil.which("agent-browser")
+        result = {"providers": details, "agent_browser": {"installed": bool(browser), "binary": browser or ""}}
+        _print_agent(result, args.json)
+        return 0 if browser and all(item["installed"] for item in details) else 1
+    if args.agent_command == "status":
+        try:
+            _print_agent(agent_module.status(args.run_dir), args.json)
+            return 0
+        except (agent_module.AgentError, run_module.GuardrailError, plan_module.PlanError) as error:
+            print(str(error), file=sys.stderr)
+            return 2
+
+    request = agent_module.AgentRunRequest(
+        provider=args.provider,
+        cwd=Path(args.cwd),
+        mode=args.mode,
+        model=args.model,
+        retain_events=args.retain_events,
+    )
+    try:
+        if args.agent_command == "run" and args.dry_run:
+            plan = plan_module.load(args.plan)
+            intended = Path(args.run_dir) if args.run_dir else request.cwd / ".holoqa" / "runs" / f"TIMESTAMP-{plan.meta.app}"
+            print(json.dumps({
+                "provider": request.provider, "mode": request.mode, "cwd": str(request.cwd.resolve()),
+                "plan": str(Path(args.plan).resolve()), "run_dir": str(intended),
+                "note": "dry run: no run, config, or coding-agent process was created",
+            }, indent=2))
+            return 0
+        if args.agent_command == "run":
+            result = agent_module.create_and_launch(
+                args.plan, request, tag=args.tag, commit=args.commit, tester=args.tester,
+                base_url=args.base_url, run_dir=args.run_dir,
+            )
+        else:
+            run = run_module.find(args.run_dir)
+            result = agent_module.launch(request, run, resume=True)
+        if args.package:
+            result["package"] = report_module.package(run_module.find(result["holoqa"]["run_dir"]), strict=True)
+        _print_agent(result, args.json)
+        return 0 if result["agent"]["exit_code"] == 0 else result["agent"]["exit_code"] or 1
+    except (agent_module.AgentError, run_module.GuardrailError, plan_module.PlanError, report_module.PackageError, OSError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+
+def _tui_mode(mode: str, sandbox: bool) -> str:
+    return mode or ("unattended" if sandbox else "supervised")
+
+
+def tui_command(args: argparse.Namespace) -> int:
+    """Launch the optional interactive dashboard or its safe layout demo."""
+    try:
+        from holoqa.tui import HoloQATui
+        from holoqa.sandbox import TuiSandbox
+
+        if args.demo:
+            if args.sandbox:
+                print("--demo and --sandbox are mutually exclusive", file=sys.stderr)
+                return 2
+            HoloQATui.demo().run()
+            return 0
+        if not args.sandbox and (not args.plan or not args.provider):
+            print("tui requires --plan and --provider, or use --demo", file=sys.stderr)
+            return 2
+        sandbox = TuiSandbox.create() if args.sandbox else None
+        previous_base_url = os.environ.get("SMOKE_BASE_URL")
+        if sandbox:
+            os.environ["SMOKE_BASE_URL"] = sandbox.base_url
+        try:
+            provider = args.provider or "codex"
+            cwd = sandbox.root if sandbox else Path(args.cwd)
+            plan_path = sandbox.plan if sandbox else Path(args.plan)
+            mode = _tui_mode(args.mode, bool(sandbox))
+            request = agent_module.AgentRunRequest(
+                provider=provider, cwd=cwd, mode=mode,
+                model=args.model, retain_events=args.retain_events,
+            )
+            print(f"TUI sandbox: {sandbox.root if sandbox else cwd}")
+            if sandbox:
+                print(f"Fixture URL: {sandbox.base_url}")
+            HoloQATui(
+                plan_path=plan_path, request=request,
+                run_dir=args.run_dir if not sandbox else str(sandbox.root / ".holoqa" / "runs" / "tui"),
+                tag=args.tag, commit=args.commit, tester=args.tester,
+                base_url=args.base_url or (sandbox.base_url if sandbox else ""),
+            ).run()
+            return 0
+        finally:
+            if previous_base_url is None:
+                os.environ.pop("SMOKE_BASE_URL", None)
+            else:
+                os.environ["SMOKE_BASE_URL"] = previous_base_url
+            if sandbox:
+                root = sandbox.root
+                if args.cleanup_sandbox:
+                    sandbox.cleanup()
+                    print(f"Removed sandbox: {root}")
+                else:
+                    sandbox.close()
+                    print(f"Sandbox retained at: {root}")
+    except (agent_module.AgentError, plan_module.PlanError, OSError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    except Exception as error:
+        from holoqa.sandbox import SandboxError
+        if isinstance(error, SandboxError):
+            print(str(error), file=sys.stderr)
+            return 2
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     # Not __doc__: that is RST for developers, and its em-dashes mojibake on a
     # cp1252 console. Users get plain ASCII.
@@ -331,6 +472,51 @@ def main(argv: list[str] | None = None) -> int:
     validate.add_argument("plan")
     status = sub.add_parser("status", help="show the active run")
     status.add_argument("--run-dir", default="")
+    tui = sub.add_parser("tui", help="open the interactive agent dashboard")
+    tui.add_argument("--demo", action="store_true", help="show a safe layout demo without launching an agent")
+    tui.add_argument("--sandbox", action="store_true", help="use a disposable localhost Git workspace and fixture app")
+    tui.add_argument("--cleanup-sandbox", action="store_true", help="remove the generated sandbox after exit")
+    tui.add_argument("--plan", default="", help="plan file for a real agent run")
+    tui.add_argument("--provider", choices=agent_module.PROVIDERS, default="")
+    tui.add_argument("--cwd", default=".")
+    tui.add_argument(
+        "--mode", default="", choices=agent_module.MODES,
+        help="execution mode (sandbox defaults to unattended; otherwise supervised)",
+    )
+    tui.add_argument("--model", default="")
+    tui.add_argument("--run-dir", default="")
+    tui.add_argument("--tag", default="")
+    tui.add_argument("--commit", default="")
+    tui.add_argument("--tester", default="")
+    tui.add_argument("--base-url", default="")
+    tui.add_argument("--retain-events", action="store_true")
+    agent = sub.add_parser("agent", help="run a coding agent through HoloQA")
+    agent_sub = agent.add_subparsers(dest="agent_command", required=True)
+    agent_providers = agent_sub.add_parser("providers", help="list supported coding agents")
+    agent_providers.add_argument("--json", action="store_true")
+    agent_doctor = agent_sub.add_parser("doctor", help="check coding-agent prerequisites")
+    agent_doctor.add_argument("--provider", choices=agent_module.PROVIDERS)
+    agent_doctor.add_argument("--json", action="store_true")
+    agent_status = agent_sub.add_parser("status", help="show wrapper and HoloQA run status")
+    agent_status.add_argument("--run-dir", required=True)
+    agent_status.add_argument("--json", action="store_true")
+    for name, help_text in (("run", "start a new HoloQA run with a coding agent"), ("resume", "continue an existing HoloQA run with a coding agent")):
+        command = agent_sub.add_parser(name, help=help_text)
+        if name == "run":
+            command.add_argument("plan")
+            command.add_argument("--tag", default="")
+            command.add_argument("--commit", default="")
+            command.add_argument("--tester", default="")
+            command.add_argument("--base-url", default="")
+            command.add_argument("--dry-run", action="store_true")
+        command.add_argument("--provider", required=True, choices=agent_module.PROVIDERS)
+        command.add_argument("--cwd", default=".")
+        command.add_argument("--mode", default="supervised", choices=agent_module.MODES)
+        command.add_argument("--model", default="")
+        command.add_argument("--run-dir", required=(name == "resume"), default="")
+        command.add_argument("--package", action="store_true")
+        command.add_argument("--retain-events", action="store_true", help="persist raw agent output in the run directory")
+        command.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
 
@@ -361,6 +547,10 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(json.dumps(run.status(plan), indent=2))
         return 0
+    if args.command == "tui":
+        return tui_command(args)
+    if args.command == "agent":
+        return agent_command(args)
 
     from holoqa.mcp import main as serve
 

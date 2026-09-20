@@ -307,7 +307,10 @@ class Run:
             "pending": pending,
             "next_step": next_step,
             "vars": self.vars(),
-            "decision": decision(counts),
+            # An incomplete checklist is not releasable. This matters to the
+            # agent wrapper: an agent that exits before judging a step must
+            # never make an all-zero run look green.
+            "decision": "HOLD" if pending else decision(counts),
         }
 
 

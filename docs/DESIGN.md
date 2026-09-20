@@ -51,6 +51,12 @@ Install is one MCP entry plus `agent-browser` on PATH:
 { "mcpServers": { "holoqa": { "command": "holoqa", "args": [] } } }
 ```
 
+The local coding-agent wrapper is an adapter around this boundary, not a
+replacement for it. It launches Codex, Claude, or OpenCode with a temporary
+HoloQA MCP configuration, streams readable lifecycle events, and returns only
+the verdict calculated from the run directory. The optional Textual TUI is a
+client of that stream and run state; it cannot assert or rewrite a verdict.
+
 ## The plan file
 
 One YAML file per application, committed beside the code. This is the only
@@ -206,6 +212,9 @@ src/holoqa/
   run.py        run dir, run.json, evidence, revisions        ~200
   report.py     xlsx fill (XML surgery) + md + zip            ~200
   history.py    history.jsonl, compare to last green          ~120
+  agent.py      provider-neutral coding-agent wrapper
+  sandbox.py    disposable localhost fixture workspace
+  tui.py        interactive Textual run console
 ```
 
 ~1,400 lines. Dependencies: `mcp`, `pydantic`, `pyyaml`, `openpyxl`. No boto3,
