@@ -112,6 +112,44 @@ def _demo_state() -> TuiState:
     )
 
 
+def _animated_demo_state() -> TuiState:
+    """A realistic holoshop.shop playback plan with four grouped stages."""
+    steps = [
+        ("D01", "Open Holoshop storefront", "PENDING"),
+        ("D02", "Verify campaign hero content", "PENDING"),
+        ("P01", "Open featured product detail", "PENDING"),
+        ("P02", "Verify product title and gallery", "PENDING"),
+        ("C01", "Add a product to the cart", "PENDING"),
+        ("C02", "Verify cart summary and quantity", "PENDING"),
+        ("A01", "Open account entry points", "PENDING"),
+        ("A02", "Return to storefront safely", "PENDING"),
+    ]
+    step_groups = {
+        "D01": "DISCOVERY", "D02": "DISCOVERY",
+        "P01": "PRODUCT", "P02": "PRODUCT",
+        "C01": "CART", "C02": "CART",
+        "A01": "ACCOUNT", "A02": "ACCOUNT",
+    }
+    return TuiState(
+        title="holoshop.shop smoke",
+        provider="codex",
+        mode="demo playback",
+        run_id="demo-holoshop",
+        decision="HOLD",
+        safety="Animated demo - no provider launched",
+        activity="STARTING",
+        activity_detail="Preparing local Holoshop evidence",
+        steps=steps,
+        groups={
+            "DISCOVERY": "Discovery",
+            "PRODUCT": "Product Detail",
+            "CART": "Cart Journey",
+            "ACCOUNT": "Account & Session",
+        },
+        step_groups=step_groups,
+    )
+
+
 class HoloQATui(App[None]):
     """Interactive dashboard for a real or simulated HoloQA agent run."""
 
@@ -216,6 +254,7 @@ class HoloQATui(App[None]):
         *,
         state: TuiState | None = None,
         demo: bool = False,
+        animated: bool = False,
         plan_path: Path | None = None,
         request: agent_module.AgentRunRequest | None = None,
         run_dir: str = "",
@@ -228,7 +267,8 @@ class HoloQATui(App[None]):
     ) -> None:
         super().__init__()
         self.demo_mode = demo
-        self.state = state or (_demo_state() if demo else TuiState())
+        self.animated_demo = animated
+        self.state = state or (_animated_demo_state() if animated else (_demo_state() if demo else TuiState()))
         self.plan_path = plan_path
         self.request = request
         self.run_dir = run_dir
@@ -246,18 +286,25 @@ class HoloQATui(App[None]):
         self.transcript_filter = "all"
         self.transcript_query = ""
         self.log_path: Path | None = None
-        self._started_monotonic: float | None = time.monotonic() - 207 if demo else None
-        self._last_event_monotonic: float | None = time.monotonic() - 12.4 if demo else None
+        self._started_monotonic: float | None = (
+            time.monotonic() - 207 if demo and not animated else (time.monotonic() if animated else None)
+        )
+        self._last_event_monotonic: float | None = (
+            time.monotonic() - 12.4 if demo and not animated else (time.monotonic() if animated else None)
+        )
         self._last_error = ""
         self.selected_step_id: str | None = None
         self.selected_artifact_index = 0
         self.selected_assertion_index = 0
         self.collapsed_groups: set[str] = set()
         self.follow_live = True
+        self._animated_index = 0
+        self._animated_phase = 0
+        self._animated_timer = None
 
     @classmethod
-    def demo(cls) -> "HoloQATui":
-        return cls(demo=True)
+    def demo(cls, *, animated: bool = False) -> "HoloQATui":
+        return cls(demo=True, animated=animated)
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
@@ -307,7 +354,10 @@ class HoloQATui(App[None]):
         self._render_state()
         self.set_interval(1, self._refresh_activity)
         if self.demo_mode:
-            self._append_demo_transcript()
+            if self.animated_demo:
+                self._start_animated_demo()
+            else:
+                self._append_demo_transcript()
         if not self.demo_mode and self.plan_path and self.request:
             self._start_agent()
 
@@ -615,6 +665,173 @@ class HoloQATui(App[None]):
         ]
         for timestamp, source, message in lines:
             self._append_log(message, source=source, timestamp=timestamp)
+
+    def _start_animated_demo(self) -> None:
+        self._prepare_animated_demo_run()
+        self.state.activity = "STARTING"
+        self.state.activity_detail = "Loading captured Holoshop fixtures"
+        self._append_log(
+            "Animated playback loaded from local Holoshop captures",
+            source="holoqa_demo",
+        )
+        self._animated_timer = self.set_interval(1.15, self._advance_animated_demo)
+        self._advance_animated_demo()
+
+    def _prepare_animated_demo_run(self) -> None:
+        asset_dir = Path(__file__).parent / "assets" / "demo"
+        self.run_dir = tempfile.mkdtemp(prefix="holoqa-holoshop-demo-")
+        root = Path(self.run_dir)
+        evidence_dir = root / "evidence"
+        out_dir = root / "out"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._animated_artifact_sources = {
+            "D01": ("screenshot", "holoshop-home.png", "storefront-home.png"),
+            "D02": ("screenshot", "holoshop-home.png", "campaign-hero.png"),
+            "P01": ("screenshot", "holoshop-product.png", "product-detail.png"),
+            "P02": ("screenshot", "holoshop-product.png", "product-gallery.png"),
+            "C01": ("screenshot", "holoshop-products.png", "cart-add-product.png"),
+            "C02": ("screenshot", "holoshop-products.png", "cart-summary.png"),
+            "A01": ("screenshot", "holoshop-home.png", "account-entry-points.png"),
+            "A02": ("screenshot", "holoshop-home.png", "return-to-storefront.png"),
+        }
+        for kind, source, target in self._animated_artifact_sources.values():
+            source_path = asset_dir / source
+            target_path = evidence_dir / target
+            if source_path.is_file():
+                shutil.copy2(source_path, target_path)
+        (out_dir / "report.md").write_text(
+            "# Holoshop animated demo\n\n"
+            "Synthetic playback using locally retained screenshots captured from "
+            "https://www.holoshop.shop/.\n",
+            encoding="utf-8",
+        )
+        (out_dir / agent_module.EVENTS_FILE).write_text(
+            "{\"type\":\"demo.playback\",\"provider\":\"codex\"}\n",
+            encoding="utf-8",
+        )
+        self._write_animated_manifest()
+
+    def _write_animated_manifest(self) -> None:
+        if not self.run_dir:
+            return
+        root = Path(self.run_dir)
+        steps: dict[str, dict[str, Any]] = {}
+        for step_id, title, verdict in self.state.steps:
+            observations = [
+                {
+                    "kind": item.kind,
+                    "file": item.name,
+                    "bytes": item.size,
+                    "captured_at": item.captured_at,
+                }
+                for item in self.state.artifacts if item.step_id == step_id
+            ]
+            assertions = [
+                {"kind": item.kind, "ok": item.passed, "detail": item.detail}
+                for item in self.state.assertions.get(step_id, [])
+            ]
+            steps[step_id] = {
+                "id": step_id,
+                "title": title,
+                "stage": self.state.step_groups.get(step_id, ""),
+                "verdict": None if verdict in {"PENDING", "IN PROGRESS"} else verdict,
+                "observations": observations,
+                "assertions": assertions,
+            }
+        (root / "run.json").write_text(
+            json.dumps({
+                "run_id": self.state.run_id,
+                "app": "holoshop.shop",
+                "plan_path": "holoshop-demo.plan.yaml",
+                "steps": steps,
+            }, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _advance_animated_demo(self) -> None:
+        if not self.animated_demo or self._animated_index >= len(self.state.steps):
+            return
+        step_id, title, verdict = self.state.steps[self._animated_index]
+        if self._animated_phase == 0:
+            self.state.activity = "RUNNING"
+            self.state.activity_detail = title
+            self._last_event_monotonic = time.monotonic()
+            self.state.steps = [
+                (row_id, row_title, "IN PROGRESS" if row_id == step_id else row_verdict)
+                for row_id, row_title, row_verdict in self.state.steps
+            ]
+            self.selected_step_id = step_id
+            self._append_log(
+                f"Navigating to {self._animated_route(step_id)}",
+                source="holoqa_observe", step_id=step_id,
+            )
+            self._animated_phase = 1
+            self._render_state()
+            return
+
+        kind, _, filename = self._animated_artifact_sources[step_id]
+        path = Path(self.run_dir) / "evidence" / filename
+        item = ArtifactItem(
+            step_id, kind, filename, path,
+            datetime.now().isoformat(timespec="seconds"), path.stat().st_size if path.exists() else 0,
+        )
+        self.state.artifacts.append(item)
+        self.state.evidence.append(f"{step_id}: {filename}")
+        self.state.assertions[step_id] = [
+            AssertionItem(step_id, "visual/content", True, self._animated_assertion(step_id))
+        ]
+        self.state.steps = [
+            (row_id, row_title, "PASS" if row_id == step_id else row_verdict)
+            for row_id, row_title, row_verdict in self.state.steps
+        ]
+        self._append_log(
+            f"Captured {kind} evidence: {filename}",
+            source="holoqa_observe", step_id=step_id,
+        )
+        self._append_log(
+            f"Assertion passed: {self._animated_assertion(step_id)}",
+            source="holoqa_judge", step_id=step_id,
+        )
+        self._animated_index += 1
+        self._animated_phase = 0
+        if self._animated_index >= len(self.state.steps):
+            self.state.activity = "COMPLETE"
+            self.state.activity_detail = "All Holoshop demo tasks passed"
+            self.state.decision = "RELEASE"
+            self.state.safety = "Animated demo complete - HoloQA RELEASE"
+            if self._animated_timer is not None:
+                self._animated_timer.pause()
+        else:
+            self.selected_step_id = self.state.steps[self._animated_index][0]
+        self._write_animated_manifest()
+        self._render_state()
+
+    @staticmethod
+    def _animated_route(step_id: str) -> str:
+        return {
+            "D01": "/",
+            "D02": "/#featured",
+            "P01": "/products/hololive-summerfes-full-graphic-t-shirt",
+            "P02": "/products/hololive-summerfes-full-graphic-t-shirt#gallery",
+            "C01": "/products",
+            "C02": "/cart",
+            "A01": "/login",
+            "A02": "/",
+        }.get(step_id, "/")
+
+    @staticmethod
+    def _animated_assertion(step_id: str) -> str:
+        return {
+            "D01": "Storefront loads with HOLOSHOP navigation",
+            "D02": "Featured campaign heading is visible",
+            "P01": "Product detail page opens successfully",
+            "P02": "Product title and image gallery are present",
+            "C01": "Featured product can be selected for cart flow",
+            "C02": "Cart route is reachable without a crash",
+            "A01": "Login and registration entry points are visible",
+            "A02": "User can return to the storefront",
+        }.get(step_id, "Expected Holoshop content is visible")
 
     @staticmethod
     def _short(value: object, limit: int = 180) -> str:

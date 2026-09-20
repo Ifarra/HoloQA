@@ -388,7 +388,7 @@ def tui_command(args: argparse.Namespace) -> int:
             if args.sandbox:
                 print("--demo and --sandbox are mutually exclusive", file=sys.stderr)
                 return 2
-            HoloQATui.demo().run()
+            HoloQATui.demo(animated=args.demo == "animated").run()
             return 0
         if not args.sandbox and (not args.plan or not args.provider):
             print("tui requires --plan and --provider, or use --demo", file=sys.stderr)
@@ -473,7 +473,10 @@ def main(argv: list[str] | None = None) -> int:
     status = sub.add_parser("status", help="show the active run")
     status.add_argument("--run-dir", default="")
     tui = sub.add_parser("tui", help="open the interactive agent dashboard")
-    tui.add_argument("--demo", action="store_true", help="show a safe layout demo without launching an agent")
+    tui.add_argument(
+        "--demo", nargs="?", const="static", choices=("static", "animated"),
+        help="show a safe layout demo; use '--demo animated' for a Holoshop playback",
+    )
     tui.add_argument("--sandbox", action="store_true", help="use a disposable localhost Git workspace and fixture app")
     tui.add_argument("--cleanup-sandbox", action="store_true", help="remove the generated sandbox after exit")
     tui.add_argument("--plan", default="", help="plan file for a real agent run")

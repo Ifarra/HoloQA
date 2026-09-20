@@ -21,6 +21,7 @@ def test_tui_sandbox_is_local_git_workspace_and_serves_fixture() -> None:
 
 def test_demo_and_sandbox_flags_are_explicitly_exclusive() -> None:
     assert main(["tui", "--demo", "--sandbox"]) == 2
+    assert main(["tui", "--demo", "animated", "--sandbox"]) == 2
 
 
 def test_sandbox_tui_defaults_to_noninteractive_provider_mode() -> None:

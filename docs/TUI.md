@@ -10,7 +10,16 @@ Use demo mode to inspect the layout without launching a provider:
 
 ```bash
 holoqa tui --demo
+holoqa tui --demo animated
 ```
+
+The plain demo is a static layout preview. `--demo animated` replays a local
+eight-step `holoshop.shop` storefront journey split into four stages:
+Discovery, Product Detail, Cart Journey, and Account & Session. Each stage has
+two tasks. The replay advances automatically, produces readable observe/judge
+events, ends with a synthetic RELEASE, and exposes locally retained storefront,
+product, and catalog screenshots as evidence. It does not launch Codex (or any
+other provider) and does not require network access during playback.
 
 For an end-to-end disposable workspace, use the local sandbox:
 

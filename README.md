@@ -442,9 +442,15 @@ an agent or touching a project:
 
 ```bash
 holoqa tui --demo
+holoqa tui --demo animated
 ```
 
-The demo is safe to exit with `q`; `c` shows the cancellation/HOLD behavior.
+The plain demo is a static layout preview. The animated demo replays a
+realistic `holoshop.shop` storefront journey with four grouped stages
+(Discovery, Product Detail, Cart Journey, and Account & Session), two tasks per
+stage, readable provider events, timed verdict changes, and local screenshot
+artifacts captured from the public storefront. Both demos are safe to exit
+with `q`; `c` shows the cancellation/HOLD behavior. No provider is launched.
 For a real run, provide the same isolated workspace and plan used by the agent
 CLI:
 
@@ -615,7 +621,7 @@ useless.
 
 ```bash
 uv sync --dev
-uv run pytest -q              # 77 tests (3 real-browser tests are opt-in)
+uv run pytest -q              # 78 tests (3 real-browser tests are opt-in)
 uv run holoqa selftest        # 18 guardrail checks
 uv run holoqa validate examples/wolvesight.plan.yaml
 # Optional: run the three real-browser tests against an isolated session.

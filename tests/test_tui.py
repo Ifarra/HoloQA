@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from textual.widgets import Input, TabbedContent
 
@@ -20,6 +22,28 @@ async def test_demo_renders_the_release_dashboard() -> None:
         assert "03: sign-in.png" in str(app.query_one("#evidence").render())
         assert "2/8" in str(app.query_one("#steps-header").render())
         await pilot.pause()
+
+
+@pytest.mark.anyio
+async def test_animated_holoshop_demo_replays_four_realistic_groups() -> None:
+    app = HoloQATui.demo(animated=True)
+    async with app.run_test(size=(140, 42)) as pilot:
+        assert len(app.state.groups) == 4
+        assert all(
+            sum(group_id == app.state.step_groups.get(step_id) for step_id, _, _ in app.state.steps) >= 2
+            for group_id in app.state.groups
+        )
+        assert app._animated_timer is not None
+        app._animated_timer.pause()
+        for _ in range(len(app.state.steps) * 2):
+            app._advance_animated_demo()
+        await pilot.pause()
+        assert app.state.activity == "COMPLETE"
+        assert app.state.decision == "RELEASE"
+        assert all(verdict == "PASS" for _, _, verdict in app.state.steps)
+        assert len(app.state.artifacts) == 8
+        assert Path(app.run_dir, "out", "report.md").is_file()
+        assert "holoshop.shop" in str(app.query_one("#run-title").render())
 
 
 @pytest.mark.anyio
