@@ -595,6 +595,11 @@ and search the transcript. The header shortcuts, verdict `···` menu, and `?`
 help panel are clickable as well as keyboard-driven. An error exposes readable
 diagnostics and a safe provider retry action.
 
+`Ctrl+P` (shown as `^p` in the header) opens the scrollable theme picker. Use
+the arrow keys to move through the complete Textual theme catalog: the
+highlighted theme is applied immediately as a temporary preview, `Enter` keeps
+it, and `Esc` restores the previous theme.
+
 For the complete interaction map and artifact-safety model, see
 [docs/TUI.md](docs/TUI.md).
 
@@ -621,7 +626,7 @@ useless.
 
 ```bash
 uv sync --dev
-uv run pytest -q              # 78 tests (3 real-browser tests are opt-in)
+uv run pytest -q              # 81 tests (3 real-browser tests are opt-in)
 uv run holoqa selftest        # 18 guardrail checks
 uv run holoqa validate examples/wolvesight.plan.yaml
 # Optional: run the three real-browser tests against an isolated session.

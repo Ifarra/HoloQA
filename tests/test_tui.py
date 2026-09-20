@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from textual.containers import VerticalScroll
 from textual.widgets import Input, TabbedContent
 
 from holoqa import agent as agent_module
@@ -55,6 +56,59 @@ async def test_compact_terminal_keeps_header_and_verdict_visible() -> None:
         assert "cancel" in str(app.query_one("#shortcuts").render()).lower()
         assert app.query_one("#progress").region.bottom < app.query_one("#verdict-card").region.bottom
         assert app.query_one("#workspace").region.right == app.query_one("#body").region.right
+
+
+@pytest.mark.anyio
+async def test_theme_picker_has_ctrl_p_header_action_and_live_preview() -> None:
+    app = HoloQATui.demo()
+    async with app.run_test(size=(140, 42)) as pilot:
+        shortcuts = str(app.query_one("#shortcuts").render())
+        assert "^p" in shortcuts
+        original = app.theme
+        await pilot.press("ctrl+p")
+        assert app._theme_menu_open is True
+        assert app.query_one("#theme-menu").display is True
+        assert app.query_one("#theme-menu").option_count == len(app.available_themes)
+        assert app.query_one("#theme-menu").option_count > 7
+        selected_before = app.selected_step_id
+        await pilot.press("down")
+        assert app.theme != original
+        assert app.selected_step_id == selected_before
+        preview = app.theme
+        await pilot.press("enter")
+        assert app._theme_menu_open is False
+        assert app.theme == preview
+        await pilot.press("ctrl+p")
+        await pilot.press("down")
+        changed = app.theme
+        await pilot.press("escape")
+        assert app._theme_menu_open is False
+        assert app.theme == preview
+        assert changed != preview
+
+
+@pytest.mark.anyio
+async def test_theme_choice_persists_between_tui_instances(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOLOQA_TUI_CONFIG", str(tmp_path / "tui.json"))
+    first = HoloQATui.demo()
+    async with first.run_test() as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.press("down")
+        chosen = first.theme
+        await pilot.press("enter")
+    second = HoloQATui.demo()
+    assert second.theme == chosen
+
+
+@pytest.mark.anyio
+async def test_steps_sidebar_is_a_real_scroll_container() -> None:
+    app = HoloQATui.demo(animated=True)
+    async with app.run_test(size=(100, 30)) as pilot:
+        sidebar = app.query_one("#step-scroll", VerticalScroll)
+        assert sidebar.max_scroll_y > 0
+        sidebar.scroll_end(animate=False)
+        await pilot.pause()
+        assert sidebar.scroll_y == sidebar.max_scroll_y
 
 
 @pytest.mark.anyio

@@ -50,7 +50,12 @@ is intended only for this isolated scenario.
 | `c` | Request provider cancellation; the run remains HOLD |
 | `r` | Refresh from the authoritative run directory |
 | `?` / `m` | Open help / run actions |
+| `Ctrl+P` (`^p`) | Open the theme picker |
 | `q` | Exit while preserving run artifacts |
+
+The theme picker is keyboard-first and scrollable: `↑`/`↓` move through the
+complete Textual theme catalog, and each highlighted theme is applied immediately as a temporary live preview.
+Press `Enter` to keep the preview or `Esc` to restore the previous theme.
 
 Header shortcuts, the verdict `···` menu, group headings, step rows, evidence,
 assertions, and transcript events are also clickable. Clickable styling is

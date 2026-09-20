@@ -21,14 +21,40 @@ from typing import Any, Callable
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Input, RichLog, Static, TabbedContent, TabPane
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Input, OptionList, RichLog, Static, TabbedContent, TabPane
+from textual.widgets.option_list import Option
 from rich.text import Text
 from rich.style import Style
 
 from holoqa import agent as agent_module
 from holoqa import plan as plan_module
 from holoqa import run as run_module
+
+
+def _theme_config_path() -> Path:
+    configured = os.environ.get("HOLOQA_TUI_CONFIG", "").strip()
+    return Path(configured) if configured else Path.home() / ".holoqa" / "tui.json"
+
+
+def _load_theme_preference() -> str | None:
+    try:
+        data = json.loads(_theme_config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    value = data.get("theme") if isinstance(data, dict) else None
+    return str(value) if value else None
+
+
+def _save_theme_preference(theme_name: str) -> None:
+    path = _theme_config_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"theme": theme_name}, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        # Theme persistence is a convenience; a read-only home directory must
+        # never prevent the TUI from starting or changing themes in memory.
+        pass
 
 
 @dataclass(frozen=True)
@@ -156,8 +182,8 @@ class HoloQATui(App[None]):
     TITLE = "HoloQA Agent Console"
     CSS = """
     Screen {
-        background: #061018;
-        color: #c8d3df;
+        background: $background;
+        color: $text;
         link-style: not underline;
         link-style-hover: bold not underline;
     }
@@ -166,46 +192,48 @@ class HoloQATui(App[None]):
         link-style: not underline;
         link-style-hover: bold not underline;
     }
-    #topbar { height: 4; padding: 1 2; background: #07131c; border-bottom: solid #2a4556; }
-    #brand { width: 10; color: #46e5f0; text-style: bold; }
-    #shortcuts { width: 62; color: #b7c6d3; }
-    #meta { width: 1fr; color: #b7c6d3; }
-    #elapsed { width: 20; color: #8299ad; text-align: right; }
+    #topbar { height: 4; padding: 1 2; background: $surface; border-bottom: solid $panel; }
+    #brand { width: 10; color: $accent; text-style: bold; }
+    #shortcuts { width: 74; color: $text-muted; }
+    #meta { width: 1fr; color: $text-muted; }
+    #elapsed { width: 20; color: $text-muted; text-align: right; }
     #body { height: 1fr; }
-    #left { width: 26%; min-width: 28; border-right: solid #2a4556; }
-    #steps-header { height: 4; padding: 1 2; border-bottom: solid #172b39; }
+    #left { width: 26%; min-width: 28; border-right: solid $panel; }
+    #steps-header { height: 4; padding: 1 2; border-bottom: solid $panel; }
     #run-title { display: none; }
-    #step-table { height: 1fr; padding: 0; overflow-y: auto; scrollbar-size: 1 1; }
+    #step-scroll { height: 1fr; overflow-y: auto; scrollbar-size: 1 1; }
+    #step-table { height: auto; min-height: 1fr; padding: 0; }
     .step-row { height: 5; padding: 1 2; color: #afbdca; }
     .step-pass { color: #cbd7e2; }
     .step-current { background: #132a3a; color: #46e5f0; border-left: thick #46e5f0; }
     #workspace { width: 74%; }
-    #run-header { height: 4; padding: 1 2; border-bottom: solid #172b39; }
-    #activity { width: 1fr; height: 1; color: #46e5f0; text-style: bold; }
-    #step-clock { width: auto; height: 1; color: #8299ad; }
-    #upper { height: 58%; padding: 1 2 2 2; border-bottom: solid #2a4556; }
+    #run-header { height: 4; padding: 1 2; border-bottom: solid $panel; }
+    #activity { width: 1fr; height: 1; color: $accent; text-style: bold; }
+    #step-clock { width: auto; height: 1; color: $text-muted; }
+    #upper { height: 58%; padding: 1 2 2 2; border-bottom: solid $panel; }
     #transcript-panel { width: 1fr; }
-    #agent-log { height: 1fr; background: #061018; padding: 0; scrollbar-size: 1 1; }
-    #transcript-search { height: 3; border: round #2a4556; background: #07131c; color: #c8d3df; }
+    #agent-log { height: 1fr; background: $background; padding: 0; scrollbar-size: 1 1; }
+    #transcript-search { height: 3; border: round $panel; background: $surface; color: $text; }
     .hidden { display: none; }
-    #verdict-card { width: 28; min-width: 22; margin-left: 2; border: round #2a4556; }
-    #verdict-title { height: 4; padding: 1 2; border-bottom: solid #172b39; color: #d8e1e9; }
-    #decision { height: 4; padding: 1 2; color: #f5bd5a; text-style: bold; }
-    #verdict-counts { height: auto; padding: 1 2; border-top: solid #172b39; color: #8ca0b2; }
-    #progress { height: auto; padding: 1 2; border-top: solid #172b39; color: #c8d3df; }
+    #verdict-card { width: 28; min-width: 22; margin-left: 2; border: round $panel; }
+    #verdict-title { height: 4; padding: 1 2; border-bottom: solid $panel; color: $text; }
+    #decision { height: 4; padding: 1 2; color: $warning; text-style: bold; }
+    #verdict-counts { height: auto; padding: 1 2; border-top: solid $panel; color: $text-muted; }
+    #progress { height: auto; padding: 1 2; border-top: solid $panel; color: $text; }
     #detail-panel { height: 42%; padding: 0 2; }
-    #detail-tabs { height: 1fr; background: #061018; }
-    #detail-tabs Tabs { height: 3; background: #061018; border-bottom: solid #2a4556; }
-    #detail-tabs Tab { color: #8299ad; background: #061018; padding: 0 2; }
-    #detail-tabs Tab.-active { color: #46e5f0; text-style: bold; }
-    #detail-tabs ContentSwitcher { background: #061018; }
+    #detail-tabs { height: 1fr; background: $background; }
+    #detail-tabs Tabs { height: 3; background: $background; border-bottom: solid $panel; }
+    #detail-tabs Tab { color: $text-muted; background: $background; padding: 0 2; }
+    #detail-tabs Tab.-active { color: $accent; text-style: bold; }
+    #detail-tabs ContentSwitcher { background: $background; }
     #detail-tabs TabPane { padding: 1 0; }
-    #detail { color: #c8d3df; }
-    #evidence, #assertions { color: #8299ad; }
-    #safety { width: 1fr; height: 1; color: #8299ad; }
-    #version { width: auto; height: 1; color: #8299ad; }
-    #statusbar { height: 4; padding: 1 2; background: #07131c; border-top: solid #2a4556; color: #8299ad; }
-    #overlay { layer: overlay; dock: top; width: 64; height: auto; max-height: 24; margin: 5 8; padding: 1 2; background: #0a1924; border: round #46e5f0; color: #c8d3df; }
+    #detail { color: $text; }
+    #evidence, #assertions { color: $text-muted; }
+    #safety { width: 1fr; height: 1; color: $text-muted; }
+    #version { width: auto; height: 1; color: $text-muted; }
+    #statusbar { height: 4; padding: 1 2; background: $surface; border-top: solid $panel; color: $text-muted; }
+    #overlay { layer: overlay; dock: top; width: 64; height: auto; max-height: 24; margin: 5 8; padding: 1 2; background: $surface; border: round $accent; color: $text; }
+    #theme-menu { layer: overlay; dock: top; width: 42; height: auto; max-height: 18; margin: 5 8; padding: 1; background: $surface; border: round $accent; color: $text; overflow-y: auto; scrollbar-size: 1 1; }
     .compact #topbar { padding: 1 1; }
     .compact #brand { width: 9; }
     .compact #shortcuts { width: 1fr; }
@@ -236,6 +264,7 @@ class HoloQATui(App[None]):
         Binding("down", "cursor_down", "Next item", priority=True),
         Binding("f", "follow_live", "Follow live", priority=True),
         Binding("enter", "activate_selected", "Open", priority=True),
+        Binding("ctrl+p", "show_theme_menu", "Themes", priority=True),
         ("o", "open_selected", "Open artifact"),
         ("x", "copy_artifact_path", "Copy artifact path"),
         ("e", "reveal_artifact", "Reveal artifact"),
@@ -301,6 +330,15 @@ class HoloQATui(App[None]):
         self._animated_index = 0
         self._animated_phase = 0
         self._animated_timer = None
+        self._theme_menu_open = False
+        self._theme_before_picker = "textual-dark"
+        # Keep the complete Textual catalog available. The picker is bounded
+        # and scrollable, so adding a theme never silently removes another.
+        self._theme_names = tuple(self.available_themes)
+        saved_theme = _load_theme_preference()
+        if saved_theme in self._theme_names:
+            self.theme = saved_theme
+        self._theme_before_picker = self.theme
 
     @classmethod
     def demo(cls, *, animated: bool = False) -> "HoloQATui":
@@ -316,7 +354,8 @@ class HoloQATui(App[None]):
             with Vertical(id="left"):
                 yield Static(id="steps-header")
                 yield Static(id="run-title")
-                yield Static(id="step-table")
+                with VerticalScroll(id="step-scroll"):
+                    yield Static(id="step-table")
             with Vertical(id="workspace"):
                 with Horizontal(id="run-header"):
                     yield Static(id="activity")
@@ -345,6 +384,7 @@ class HoloQATui(App[None]):
             yield Static(id="safety")
             yield Static("holoqa", id="version")
         yield Static(id="overlay", classes="hidden")
+        yield OptionList(id="theme-menu", classes="hidden")
 
     def on_mount(self) -> None:
         self._set_compact_mode(self.size.width < 150 or self.size.height < 45)
@@ -395,6 +435,7 @@ class HoloQATui(App[None]):
         for key, label, action in (
             ("y", "copy", "copy_log"), ("p", "pause", "pause_transcript"),
             ("c", "cancel", "cancel"), ("r", "refresh", "refresh"),
+            ("^p", "theme", "show_theme_menu"),
             ("?", "help", "show_help"), ("q", "quit", "quit"),
         ):
             click = Style(underline=False, meta={"@click": f"app.{action}"})
@@ -1082,7 +1123,8 @@ class HoloQATui(App[None]):
 
     def _set_safety(self, value: str) -> None:
         self.state.safety = value
-        self.query_one("#safety", Static).update(value)
+        if self.is_mounted:
+            self.query_one("#safety", Static).update(value)
 
     def _start_agent(self) -> None:
         assert self.plan_path is not None
@@ -1285,6 +1327,9 @@ class HoloQATui(App[None]):
         self._render_state()
 
     def action_cursor_up(self) -> None:
+        if self._theme_menu_open:
+            self._move_theme(-1)
+            return
         active_tab = self.query_one("#detail-tabs", TabbedContent).active
         if active_tab == "tab-evidence":
             artifacts = self._artifacts_for_step()
@@ -1305,6 +1350,9 @@ class HoloQATui(App[None]):
         self._select_step(ids[max(0, index - 1)], user=True)
 
     def action_cursor_down(self) -> None:
+        if self._theme_menu_open:
+            self._move_theme(1)
+            return
         active_tab = self.query_one("#detail-tabs", TabbedContent).active
         if active_tab == "tab-evidence":
             indices = [index for index, _ in self._artifacts_for_step()]
@@ -1354,6 +1402,9 @@ class HoloQATui(App[None]):
             self.action_open_artifact(self.selected_artifact_index)
 
     def action_activate_selected(self) -> None:
+        if self._theme_menu_open:
+            self._commit_theme_preview()
+            return
         self.action_open_selected()
 
     def action_copy_artifact_path(self) -> None:
@@ -1395,6 +1446,9 @@ class HoloQATui(App[None]):
         search.focus()
 
     def action_hide_search(self) -> None:
+        if self._theme_menu_open:
+            self._cancel_theme_preview()
+            return
         overlay = self.query_one("#overlay", Static)
         if overlay.display:
             overlay.add_class("hidden")
@@ -1428,6 +1482,60 @@ class HoloQATui(App[None]):
         overlay.update(content)
         overlay.remove_class("hidden")
         overlay.display = True
+
+    def action_show_theme_menu(self) -> None:
+        """Open a keyboard-first theme picker with live preview."""
+        if self._theme_menu_open:
+            return
+        self.action_close_overlay()
+        self._theme_before_picker = self.theme
+        menu = self.query_one("#theme-menu", OptionList)
+        menu.set_options([Option(name, id=name) for name in self._theme_names])
+        try:
+            index = self._theme_names.index(self.theme)
+        except ValueError:
+            index = 0
+        menu.highlighted = index
+        menu.remove_class("hidden")
+        menu.display = True
+        self._theme_menu_open = True
+        menu.focus()
+        self._preview_theme(self._theme_names[index])
+
+    def _move_theme(self, delta: int) -> None:
+        if not self._theme_menu_open:
+            return
+        menu = self.query_one("#theme-menu", OptionList)
+        current = menu.highlighted if menu.highlighted is not None else 0
+        index = max(0, min(len(self._theme_names) - 1, current + delta))
+        menu.highlighted = index
+        self._preview_theme(self._theme_names[index])
+
+    def _preview_theme(self, theme_name: str) -> None:
+        self.theme = theme_name
+        self._set_safety(f"Previewing theme: {theme_name}  (Enter apply, Esc cancel)")
+
+    def _close_theme_menu(self) -> None:
+        menu = self.query_one("#theme-menu", OptionList)
+        menu.add_class("hidden")
+        menu.display = False
+        self._theme_menu_open = False
+        self.query_one("#agent-log", RichLog).focus()
+
+    def _commit_theme_preview(self) -> None:
+        selected = self.theme
+        _save_theme_preference(selected)
+        self._close_theme_menu()
+        self._set_safety(f"Theme applied: {selected}")
+
+    def _cancel_theme_preview(self) -> None:
+        self.theme = self._theme_before_picker
+        self._close_theme_menu()
+        self._set_safety(f"Theme preview cancelled: {self.theme}")
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if self._theme_menu_open and event.option.id:
+            self._preview_theme(str(event.option.id))
 
     def action_show_help(self) -> None:
         content = Text()
