@@ -1,5 +1,7 @@
 # HoloQA
 
+> An agentic QA execution framework with a built-in referee.
+
 A local MCP server that turns a checked-in test plan into an evidence-backed
 release checklist.
 
@@ -383,7 +385,7 @@ HoloQA never edits a plan — plans are human-owned and reviewed.
 ## CLI
 
 ```
-holoqa [mcp|selftest|doctor|init|validate|status]
+holoqa [mcp|selftest|doctor|init|validate|status|agent]
 ```
 
 | Command | What |
@@ -394,12 +396,89 @@ holoqa [mcp|selftest|doctor|init|validate|status]
 | `validate <plan>` | lint a plan, print warnings |
 | `status` | show the active run (`--run-dir`, or `$HOLOQA_RUN_DIR`) |
 | `selftest` | verify every guardrail, offline |
+| `agent` | launch a supported coding agent through HoloQA |
 
 `holoqa selftest` is the descendant of a previous tool's `dry-run.mjs`. It
 proves the guardrails still bite, using only temporary files. If it goes green
 while a guardrail is broken, the checklists this tool produces stop meaning
 anything — so it runs with no staging, no browser, and no network, which means
 it runs in CI.
+
+### Coding-agent wrapper
+
+HoloQA can launch a coding agent without making that agent the authority on a
+release result. The wrapper starts a run, injects HoloQA as a temporary local
+MCP server, streams the agent process, and reports the decision calculated from
+the HoloQA run when it exits.
+
+```bash
+holoqa agent doctor
+holoqa agent providers
+holoqa agent run holoqa.plan.yaml --provider codex --cwd .
+```
+
+Supported providers are `codex`, `claude`, and `opencode`. `supervised` is the
+default mode. `unattended` is explicit and intended only for an isolated staging
+environment. The wrapper does not change global provider configuration or write
+provider configuration into the project. Use `--dry-run` to inspect a launch
+without creating a run or starting an agent, and `--retain-events` only when it
+is acceptable to persist the raw agent transcript in the run directory.
+For Codex, unattended mode uses its automatic-approval workspace sandbox and
+ignores exec-policy rules only for that explicit isolated-staging mode; it never
+uses Codex's unrestricted bypass flag.
+
+```bash
+holoqa agent run holoqa.plan.yaml --provider codex --dry-run
+holoqa agent status --run-dir .holoqa/runs/20260919-1200-shop
+holoqa agent resume --run-dir .holoqa/runs/20260919-1200-shop --provider claude
+```
+
+The wrapper never accepts an agent's prose claim of success. A pending,
+interrupted, failed, or blocked run is `HOLD`; only fully judged HoloQA evidence
+can yield a release decision.
+
+### Terminal UI
+
+The wrapper also has a Textual dashboard. Explore the layout without launching
+an agent or touching a project:
+
+```bash
+holoqa tui --demo
+holoqa tui --demo animated
+```
+
+The plain demo is a static layout preview. The animated demo replays a
+realistic `holoshop.shop` storefront journey with four grouped stages
+(Discovery, Product Detail, Cart Journey, and Account & Session), two tasks per
+stage, readable provider events, timed verdict changes, and local screenshot
+artifacts captured from the public storefront. Both demos are safe to exit
+with `q`; `c` shows the cancellation/HOLD behavior. No provider is launched.
+For a real run, provide the same isolated workspace and plan used by the agent
+CLI:
+
+```bash
+holoqa tui --plan holoqa.plan.yaml --provider codex --cwd . --mode supervised
+```
+
+For a complete disposable localhost scenario, let HoloQA create the workspace,
+Git repository, fixture server, and plan:
+
+```bash
+holoqa tui --sandbox --provider codex
+```
+
+The sandbox binds only to `127.0.0.1`, defaults to Codex's isolated unattended
+workspace mode (the TUI cannot answer interactive provider approvals), and is
+retained in the system temporary directory after exit so you can inspect the
+run. Add `--mode supervised` only when your provider can receive approvals, or
+`--cleanup-sandbox` when you want the generated directory removed.
+
+The dashboard displays the agent transcript, HoloQA step state, evidence, and
+the HoloQA-computed decision. It automatically switches to a compact layout in
+terminals narrower than 150 columns or shorter than 45 rows. `c` terminates the
+provider process and leaves the run interrupted/HOLD. Press `y` to copy the
+visible transcript, or use `1`, `2`, and `3` to open Step Details, Evidence,
+and Assertions. `q` exits without deleting run artifacts.
 
 ---
 
@@ -499,6 +578,33 @@ shell. If you shell out to HoloQA from Git Bash, note that MSYS rewrites
 
 ---
 
+## TUI activity and transcript
+
+The activity line is authoritative for wrapper lifecycle: `STARTING`,
+`RUNNING`, `CANCELLING`, `COMPLETE`, or `ERROR`. The transcript summarizes
+provider events into readable messages such as “Agent is thinking” and
+“Running command …”. Original provider events remain in `agent-events.jsonl`
+when retained, while `y` copies the readable transcript to the clipboard and
+`out/agent-log.txt`.
+
+The TUI is interactive throughout: click a step or use `↑`/`↓` to inspect
+earlier steps, press `f` to return to the live step, and click a group heading
+to collapse or expand its tasks. Evidence rows open their files only after
+HoloQA validates that they are inside the run directory; `x` copies a path and
+`e` reveals it in the file manager. The Evidence and Assertions tabs support
+keyboard selection and click-to-detail. Use `p`, `v`, and `/` to pause, filter,
+and search the transcript. The header shortcuts, verdict `···` menu, and `?`
+help panel are clickable as well as keyboard-driven. An error exposes readable
+diagnostics and a safe provider retry action.
+
+`Ctrl+P` (shown as `^p` in the header) opens the scrollable theme picker. Use
+the arrow keys to move through the complete Textual theme catalog: the
+highlighted theme is applied immediately as a temporary preview, `Enter` keeps
+it, and `Esc` restores the previous theme.
+
+For the complete interaction map and artifact-safety model, see
+[docs/TUI.md](docs/TUI.md).
+
 ## Limitations
 
 Stated plainly, because a testing tool that overstates itself is worse than
@@ -522,9 +628,11 @@ useless.
 
 ```bash
 uv sync --dev
-uv run pytest -q              # 47 tests
+uv run pytest -q              # 81 tests (3 real-browser tests are opt-in)
 uv run holoqa selftest        # 18 guardrail checks
 uv run holoqa validate examples/wolvesight.plan.yaml
+# Optional: run the three real-browser tests against an isolated session.
+$env:HOLOQA_RUN_REAL_BROWSER="1"; uv run pytest -q tests/test_e2e_browser.py
 ```
 
 Browser end-to-end tests skip automatically when `agent-browser` is absent, so

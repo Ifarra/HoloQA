@@ -1,0 +1,12 @@
+meta:
+  app: agent-smoke
+  base_url: ${SMOKE_BASE_URL}
+steps:
+  - id: A1
+    title: The isolated fixture loads
+    route: /
+    do: Open the fixture URL in agent-browser, capture the page DOM and a screenshot, then judge the step.
+    expect:
+      - url_contains: 127.0.0.1
+      - text_contains: Fixture ready
+      - screenshot: required

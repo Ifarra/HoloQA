@@ -10,6 +10,8 @@ Skipped when agent-browser is absent, so the offline suite stays green.
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,10 +26,34 @@ from holoqa import report as report_module
 from holoqa import verdict as verdict_module
 from holoqa.run import Run
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("agent-browser") is None,
-    reason="agent-browser is not installed",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        shutil.which("agent-browser") is None,
+        reason="agent-browser is not installed",
+    ),
+    pytest.mark.skipif(
+        os.environ.get("HOLOQA_RUN_REAL_BROWSER") != "1",
+        reason="real browser tests are opt-in; set HOLOQA_RUN_REAL_BROWSER=1",
+    ),
+]
+
+
+@pytest.fixture(autouse=True)
+def isolated_browser_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Keep e2e runs away from a developer's default browser session.
+
+    agent-browser persists a daemon per session name.  A unique temporary
+    session makes this test deterministic even when another local browser
+    session is active, and teardown closes only the session created here.
+    """
+    suffix = re.sub(r"[^A-Za-z0-9_-]", "-", tmp_path.name)
+    monkeypatch.setenv("AGENT_BROWSER_SESSION", f"holoqa-e2e-{suffix}")
+    yield
+    try:
+        observe_module.run_cli(["close"], timeout=15)
+    except observe_module.CaptureError:
+        # A skipped or failed browser startup has nothing to close.
+        pass
 
 PAGE = b"""<!doctype html><html><head><meta charset="utf-8"><title>HoloQA fixture</title></head>
 <body><main><h1>Order status</h1><p id="state">Ready</p>
