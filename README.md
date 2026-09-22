@@ -7,6 +7,12 @@
   <img src="https://img.shields.io/badge/interface-MCP%20%2B%20TUI-46E5F0?style=for-the-badge" alt="MCP and TUI interfaces">
 </p>
 
+
+
+https://github.com/user-attachments/assets/52d74fa0-aefa-46ae-b56d-5d6b938bbb9b
+
+
+
 <p align="center">
   <strong>Evidence-backed browser QA for AI agents</strong><br>
   <sub>Observe · Judge · Referee · Release</sub>
