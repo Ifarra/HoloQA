@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "holoqa"
 version = "2.0.0"
-description = "Local MCP referee for evidence-backed release checklists"
+description = "Agentic QA execution framework: a local MCP referee that turns a checked-in test plan into an evidence-backed release checklist the agent cannot pass"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

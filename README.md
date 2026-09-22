@@ -1,5 +1,7 @@
 # HoloQA
 
+> An agentic QA execution framework with a built-in referee.
+
 A local MCP server that turns a checked-in test plan into an evidence-backed
 release checklist.
 
