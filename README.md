@@ -1,5 +1,17 @@
 # HoloQA
 
+<p align="center">
+  <a href="https://github.com/Ifarra/HoloQA"><img src="https://img.shields.io/github/stars/Ifarra/HoloQA?style=for-the-badge&logo=github&label=stars" alt="GitHub stars"></a>
+  <a href="https://github.com/Ifarra/HoloQA/commits/main"><img src="https://img.shields.io/github/last-commit/Ifarra/HoloQA?style=for-the-badge&logo=git&label=updated" alt="Last commit"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11 or newer">
+  <img src="https://img.shields.io/badge/interface-MCP%20%2B%20TUI-46E5F0?style=for-the-badge" alt="MCP and TUI interfaces">
+</p>
+
+<p align="center">
+  <strong>Evidence-backed browser QA for AI agents</strong><br>
+  <sub>Observe · Judge · Referee · Release</sub>
+</p>
+
 > An agentic QA execution framework with a built-in referee.
 
 A local MCP server that turns a checked-in test plan into an evidence-backed
