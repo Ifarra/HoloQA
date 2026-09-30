@@ -94,9 +94,15 @@ def test_plan_validate_with_no_path_returns_the_format_reference():
     assert reference["status"] == "reference"
     assert set(reference["assertions"]) == {
         "url_contains", "url_matches", "text_contains", "text_not_contains",
-        "api", "json", "screenshot", "changed", "capture",
+        "api", "json", "header", "file", "screenshot", "changed", "capture",
     }
+    # The newer surface must be discoverable too, or an agent writing a plan
+    # will not use it and will write the workaround instead.
     assert "quoting" in reference
+    assert "scoping" in reference
+    assert "requires" in reference
+    assert "actors" in reference
+    assert "strength" in reference
     assert "meta:" in reference["template"]
 
 

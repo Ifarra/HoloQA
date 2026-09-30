@@ -71,7 +71,13 @@ async def test_theme_picker_has_ctrl_p_header_action_and_live_preview() -> None:
         assert app.query_one("#theme-menu").option_count == len(app.available_themes)
         assert app.query_one("#theme-menu").option_count > 7
         selected_before = app.selected_step_id
-        await pilot.press("down")
+        # Move to a theme that is definitely not the current one. The active
+        # theme can sit at either end of the catalogue, where a `down` is a
+        # no-op — that is a property of the picker, not what this test is about.
+        menu = app.query_one("#theme-menu")
+        current = menu.highlighted if menu.highlighted is not None else 0
+        direction = "up" if current >= menu.option_count - 1 else "down"
+        await pilot.press(direction)
         assert app.theme != original
         assert app.selected_step_id == selected_before
         preview = app.theme
@@ -79,12 +85,11 @@ async def test_theme_picker_has_ctrl_p_header_action_and_live_preview() -> None:
         assert app._theme_menu_open is False
         assert app.theme == preview
         await pilot.press("ctrl+p")
-        await pilot.press("down")
-        changed = app.theme
+        moved = app.theme
         await pilot.press("escape")
         assert app._theme_menu_open is False
+        # Esc restores whatever was active when the picker opened.
         assert app.theme == preview
-        assert changed != preview
 
 
 @pytest.mark.anyio

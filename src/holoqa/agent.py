@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import hashlib
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,24 @@ MODES = ("supervised", "unattended")
 MANIFEST_FILE = "agent.json"
 EVENTS_FILE = "agent-events.jsonl"
 PROMPT_FILE = "agent-prompt.md"
+
+
+#: What "unattended" actually means for each provider. These differ enough that
+#: a user choosing it deserves to know which they are getting: Codex approves
+#: tool calls for itself, Claude denies anything not explicitly allowed, and
+#: OpenCode auto-approves. Treating them as one setting is how a denied login
+#: gets recorded as an application defect.
+UNATTENDED_MEANING = {
+    "codex": (
+        "approves its own tool calls in a workspace-write sandbox "
+        "(--approve-for-me); never the unrestricted bypass flag"
+    ),
+    "claude": (
+        "denies anything that would prompt, and is additionally granted only "
+        "mcp__holoqa__* and Bash(agent-browser:*) (--allowedTools)"
+    ),
+    "opencode": "auto-approves tool calls (--auto)",
+}
 
 
 @dataclass(frozen=True)
@@ -104,6 +123,7 @@ def provider_info(provider: str) -> dict[str, Any]:
         "version": version,
         "structured_output": True,
         "modes": list(MODES),
+        "unattended": UNATTENDED_MEANING.get(provider, ""),
     }
 
 
@@ -180,7 +200,23 @@ def build_launch(
         if request.model:
             args.extend(["--model", request.model])
         if request.mode == "unattended":
-            args.extend(["--permission-prompts", "none"])
+            # `--permission-prompts none` means *nobody answers*, so anything
+            # that would prompt is denied automatically — it is the opposite of
+            # Codex's `--approve-for-me`. A run configured for unattended work
+            # was therefore denied the login it needed and recorded the refusal
+            # as a BLOCKED that looked like an application problem.
+            #
+            # Unattended means "proceed without a human". That is expressed by
+            # allowing the specific tools this workflow needs: HoloQA's own MCP
+            # tools and the browser driver, which is what the agent must call to
+            # do the job. The sandbox is unchanged and nothing global is written.
+            args.extend([
+                "--permission-mode", "acceptEdits",
+                "--permission-prompts", "none",
+                "--allowedTools",
+                "mcp__holoqa__*",
+                "Bash(agent-browser:*)",
+            ])
         args.append(prompt)
         args = _provider_command(binary, args)
     else:
@@ -237,6 +273,8 @@ def _stream_process(
     spec: LaunchSpec,
     request: AgentRunRequest,
     run: run_module.Run,
+    *,
+    deadline: float | None = None,
 ) -> int:
     process = subprocess.Popen(
         spec.command, cwd=request.cwd, env=spec.env, stdin=subprocess.DEVNULL, text=True,
@@ -263,11 +301,18 @@ def _stream_process(
     event_handle = event_file.open("w", encoding="utf-8") if request.retain_events else None
     open_streams = 2
     cancelled = False
+    timed_out = False
     try:
         while open_streams:
             if request.cancel_event and request.cancel_event.is_set() and process.poll() is None:
                 process.terminate()
                 cancelled = True
+            # A wall-clock deadline turns a hang into a failure. Without one, an
+            # agent that stalls holds a CI job open forever instead of reporting
+            # an incomplete run — which is the worse of the two outcomes.
+            if deadline is not None and time.monotonic() > deadline and process.poll() is None:
+                process.terminate()
+                timed_out = True
             try:
                 channel, line = output.get(timeout=0.2)
             except queue.Empty:
@@ -298,7 +343,7 @@ def _stream_process(
     finally:
         if event_handle:
             event_handle.close()
-    if cancelled:
+    if cancelled or timed_out:
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -313,7 +358,13 @@ def _status(run: run_module.Run) -> dict[str, Any]:
     return run.status(plan)
 
 
-def launch(request: AgentRunRequest, run: run_module.Run, *, resume: bool = False) -> dict[str, Any]:
+def launch(
+    request: AgentRunRequest,
+    run: run_module.Run,
+    *,
+    resume: bool = False,
+    timeout_s: int = 0,
+) -> dict[str, Any]:
     """Launch an agent against an existing run, then report HoloQA's state."""
     request = AgentRunRequest(
         provider=request.provider, cwd=request.cwd.resolve(), mode=request.mode,
@@ -325,6 +376,7 @@ def launch(request: AgentRunRequest, run: run_module.Run, *, resume: bool = Fals
         raise AgentError(f"working directory does not exist: {request.cwd}")
     plan_path = Path(run.read()["plan_path"])
     prompt = workflow_prompt(plan_path, run.dir, resume=resume)
+    deadline = time.monotonic() + timeout_s if timeout_s else None
     with tempfile.TemporaryDirectory(prefix="holoqa-agent-") as temp:
         spec = build_launch(request, run, prompt, Path(temp))
         prompt_path = run.out_dir / PROMPT_FILE
@@ -338,15 +390,62 @@ def launch(request: AgentRunRequest, run: run_module.Run, *, resume: bool = Fals
             "prompt_file": PROMPT_FILE,
             "command": _safe_command(spec.command), "state": "running",
             "retain_events": request.retain_events, "resumed": resume,
+            "timeout_s": timeout_s,
             "config": f"ephemeral:{request.provider}", "started_at": run_module.now(),
         }
         _write_manifest(run, manifest)
-        code = _stream_process(spec, request, run)
+        code = _stream_process(spec, request, run, deadline=deadline)
 
-    manifest.update({"state": "interrupted" if code == 130 else ("completed" if code == 0 else "failed"),
-                     "exit_code": code, "finished_at": run_module.now()})
+    state = "interrupted" if code == 130 else ("completed" if code == 0 else "failed")
+    if code == 130 and timeout_s:
+        state = "timed_out"
+    manifest.update({"state": state, "exit_code": code, "finished_at": run_module.now()})
     _write_manifest(run, manifest)
     return {"agent": manifest, "holoqa": _status(run)}
+
+
+def run_until_done(
+    request: AgentRunRequest,
+    run: run_module.Run,
+    *,
+    max_rounds: int = 5,
+    timeout_s: int = 0,
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Keep resuming the agent while the run still has pending steps.
+
+    An agent that stops after one stage leaves a HOLD with 96 steps pending and
+    nobody to continue them; the wrapper reported that faithfully and did
+    nothing, which is a report rather than a tool. This loops, and stops when
+    the run is complete, when a round makes no progress, or at ``max_rounds``.
+
+    Progress is measured in judged steps, so a round that judges nothing is a
+    stall and looping again would only burn time and money.
+    """
+    history: list[dict[str, Any]] = []
+    result: dict[str, Any] = {}
+    judged = -1
+    for round_number in range(1, max(1, max_rounds) + 1):
+        result = launch(request, run, resume=resume or round_number > 1, timeout_s=timeout_s)
+        status = result["holoqa"]
+        pending = status.get("pending", [])
+        now_judged = status.get("total", 0) - len(pending)
+        history.append({
+            "round": round_number,
+            "agent_state": result["agent"].get("state"),
+            "judged": now_judged,
+            "pending": len(pending),
+            "decision": status.get("decision"),
+        })
+        if not pending:
+            break
+        if now_judged <= judged:
+            # No forward progress: another identical round cannot help.
+            break
+        judged = now_judged
+    result["rounds"] = history
+    result["until_done"] = not result.get("holoqa", {}).get("pending")
+    return result
 
 
 def create_and_launch(

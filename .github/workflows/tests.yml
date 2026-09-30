@@ -1,0 +1,40 @@
+name: tests
+
+# The whole value of this repository rests on one claim: a checklist it produces
+# means something. That claim is enforced by tests, so the tests run on every
+# change. An untested guarantee is a claim, not a guarantee.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    name: offline suite (python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --dev
+
+      # No staging, no browser, no network. If this needs any of those, the
+      # guardrails have stopped being testable in CI, which is their whole point.
+      - name: Guardrail selftest
+        run: uv run holoqa selftest
+
+      - name: Test suite
+        run: uv run pytest -q
+
+      - name: The shipped example plan still validates
+        run: uv run holoqa validate examples/wolvesight.plan.yaml

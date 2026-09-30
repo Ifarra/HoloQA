@@ -8,3 +8,5 @@ htmlcov/
 .holoqa/
 .codebase-memory/
 temp/
+output/
+tmp/

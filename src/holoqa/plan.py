@@ -25,13 +25,27 @@ ASSERTION_KINDS = (
     "text_not_contains",
     "api",
     "json",
+    "header",
     "screenshot",
     "changed",
     "capture",
+    "file",
 )
 
 _VAR = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 _ENV = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+
+
+#: Allowed values for ``KnownBehavior.verdict_hint``. A closed set, because the
+#: field is consumed by report classification: an unrecognised value used to be
+#: accepted silently and then vanish from the report, which reads as "this is a
+#: new regression" for a defect the plan already knew about.
+VERDICT_HINTS = ("not_a_failure", "known_defect")
+
+#: How much a passing step proves. A closed set for the same reason the verdict
+#: vocabulary is: a report that groups by strength must not silently drop a
+#: value it does not recognise.
+STRENGTHS = ("normal", "weak")
 
 
 class PlanError(ValueError):
@@ -43,6 +57,15 @@ class KnownBehavior(BaseModel):
     title: str
     applies_to: list[str] = Field(default_factory=list)
     verdict_hint: str = "not_a_failure"
+
+    @field_validator("verdict_hint")
+    @classmethod
+    def _known_hint(cls, value: str) -> str:
+        if value not in VERDICT_HINTS:
+            raise ValueError(
+                f"unknown verdict_hint {value!r}; choose from {', '.join(VERDICT_HINTS)}"
+            )
+        return value
 
 
 class Stage(BaseModel):
@@ -58,26 +81,125 @@ class Step(BaseModel):
     route: str = ""
     do: str = ""
     expect: list[dict[str, Any]] = Field(default_factory=list)
+    requires: list[dict[str, Any]] = Field(default_factory=list)
     blocked_if: str = ""
+    actor: str = ""
+    #: How much a PASS here actually proves. `weak` is for a step that can only
+    #: be verified by a human reading the evidence — the reviewer marked 82 such
+    #: steps with a `# UJI LEMAH` comment, which nothing could count or filter.
+    #: Making it a field means a report can say "12 of 31 passes are weak".
+    strength: str = "normal"
+    weak_reason: str = ""
 
-    @field_validator("expect")
+    @field_validator("strength")
     @classmethod
-    def _known_kinds(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _known_strength(cls, value: str) -> str:
+        if value not in STRENGTHS:
+            raise ValueError(
+                f"unknown strength {value!r}; choose from {', '.join(STRENGTHS)}"
+            )
+        return value
+
+    @field_validator("expect", "requires", mode="before")
+    @classmethod
+    def _known_kinds(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
         for assertion in value:
-            if not isinstance(assertion, dict) or len(assertion) != 1:
+            if not isinstance(assertion, dict) or not assertion:
+                raise ValueError(f"each entry must be a mapping, got {assertion!r}")
+            # YAML 1.1 parses a bare `on:` key as the boolean True, so a plan
+            # written with `on: create` arrives here as `{True: 'create'}`.
+            # Normalise it before pydantic coerces the keys, rather than making
+            # the author discover that YAML's boolean trap applies to `on`.
+            if True in assertion and "scope" not in assertion:
+                assertion["scope"] = assertion.pop(True)
+            keys = set(assertion)
+            # An entry is `{kind: value}`, optionally with a second key naming
+            # which capture it applies to.
+            extra = keys - {"scope"}
+            if len(extra) != 1:
                 raise ValueError(
-                    f"each expect entry must be a single-key mapping, got {assertion!r}"
+                    f"each entry must be one assertion, optionally with "
+                    f"`scope: <capture>`; got {assertion!r}"
                 )
-            (kind,) = assertion
+            (kind,) = extra
             if kind not in ASSERTION_KINDS:
                 raise ValueError(
                     f"unknown assertion {kind!r}; choose from {', '.join(ASSERTION_KINDS)}"
                 )
         return value
 
+    def _entries(self, field: list[dict[str, Any]]) -> list[tuple[str, Any, str]]:
+        out: list[tuple[str, Any, str]] = []
+        for item in field:
+            pairs = [(k, v) for k, v in item.items() if k != "scope"]
+            kind, value = pairs[0]
+            out.append((kind, value, str(item.get("scope", ""))))
+        return out
+
     @property
-    def assertions(self) -> list[tuple[str, Any]]:
-        return [next(iter(item.items())) for item in self.expect]
+    def assertions(self) -> list[tuple[str, Any, str]]:
+        """``(kind, value, scope)`` for each assertion. ``scope`` is ``""`` unset."""
+        return self._entries(self.expect)
+
+    @property
+    def requirements(self) -> list[tuple[str, Any, str]]:
+        """``(kind, value, scope)`` for each precondition."""
+        return self._entries(self.requires)
+
+    def assertion(self, kind: str) -> Any:
+        """The value of the first assertion of ``kind``, or ``None``.
+
+        A convenience for readers and tests: the internal tuple shape carries
+        the ``scope`` too, but most callers only want the value.
+        """
+        for found, value, _scope in self.assertions:
+            if found == kind:
+                return value
+        return None
+
+
+class Actor(BaseModel):
+    """A browser identity a step runs in.
+
+    Declared in ``meta.actors`` and referenced by ``step.actor``. Each actor
+    gets its own isolated agent-browser session, so a step that needs an admin
+    and a step that needs a proctor no longer fight over one cookie jar.
+
+    Credentials come from the environment (``${ADMIN_PASSWORD}``), which is the
+    point: the secret never lands in the plan file, in a ``do:`` instruction the
+    agent reads, or in the transcript. An actor with no ``as`` is anonymous — a
+    clean session, useful for testing the logged-out path.
+    """
+
+    as_: str = Field(default="", alias="as")
+    password: str = ""
+    login: str = ""
+    note: str = ""
+
+    model_config = {"populate_by_name": True}
+
+    @property
+    def identifier(self) -> str:
+        return self.as_
+
+    @property
+    def anonymous(self) -> bool:
+        return not self.as_
+
+
+class BrowserOptions(BaseModel):
+    """Browser flags a plan needs but the tool should not hardcode.
+
+    A staging environment with a self-signed certificate, or a camera that must
+    be faked, used to require an environment variable or a wrapper script —
+    which put a per-application concern outside the plan that documents the
+    application. These are passed through to agent-browser.
+    """
+
+    ignore_https_errors: bool = False
+    args: list[str] = Field(default_factory=list)
 
 
 class Meta(BaseModel):
@@ -85,6 +207,8 @@ class Meta(BaseModel):
     base_url: str = ""
     language: str = "en"
     workbook: str | None = None
+    actors: dict[str, Actor] = Field(default_factory=dict)
+    browser: BrowserOptions = Field(default_factory=BrowserOptions)
 
 
 class Plan(BaseModel):
@@ -107,6 +231,22 @@ class Plan(BaseModel):
 
     def has_kb(self, kb_id: str) -> bool:
         return any(entry.id == kb_id for entry in self.known_behaviors)
+
+    @property
+    def default_actor(self) -> str:
+        """The actor a step runs in when it does not name one.
+
+        The first declared actor, or ``"default"`` when the plan declares none —
+        which keeps every existing single-actor plan working unchanged.
+        """
+        return next(iter(self.meta.actors), "default")
+
+    def actor(self, name: str) -> Actor | None:
+        return self.meta.actors.get(name)
+
+    def actor_for(self, step_id: str) -> str:
+        """The session name a step's captures must use."""
+        return self.step(step_id).actor or self.default_actor
 
     @property
     def step_ids(self) -> list[str]:
@@ -158,6 +298,24 @@ def load(path: str | Path) -> Plan:
     meta = data.get("meta") or {}
     if isinstance(meta, dict) and meta.get("base_url"):
         meta["base_url"] = _expand_env(str(meta["base_url"]))
+    # Actor credentials arrive as ${ENV} too. Expanding them here means a secret
+    # never reaches disk in a plan file, and the redaction layer sees a resolved
+    # value it can strip if one ever lands in a captured body.
+    actors = meta.get("actors") if isinstance(meta, dict) else None
+    if isinstance(actors, dict):
+        for name, actor in actors.items():
+            if isinstance(actor, dict) and isinstance(actor.get("password"), str):
+                # Checked on the raw value, before expansion: afterwards a
+                # resolved secret is indistinguishable from a literal one, and
+                # the whole point is to catch the literal before it is committed.
+                if actor["password"] and not _ENV.search(actor["password"]):
+                    raise PlanError(
+                        f"actor {name!r} has a literal password; write "
+                        "password: ${ENV_VAR} so the secret is never committed"
+                    )
+                for field in ("password", "login", "as"):
+                    if isinstance(actor.get(field), str):
+                        actor[field] = _expand_env(actor[field])
 
     # A section whose entries are all commented out parses as null, not as an
     # empty list. That is the first thing a new user does to the template, so
@@ -208,6 +366,58 @@ def _validate_graph(plan: Plan) -> None:
 
     _reject_cycles(plan)
     _validate_bindings(plan)
+    _validate_assertions(plan)
+    _validate_actors(plan)
+
+
+def _validate_actors(plan: Plan) -> None:
+    """A step's ``actor`` must name a declared actor.
+
+    A typo here would silently run the step in the wrong session, which for a
+    step that tests ownership is the difference between a real test and a
+    meaningless one. It is refused at load time instead.
+    """
+    declared = set(plan.meta.actors)
+    for step in plan.steps:
+        if step.actor and step.actor not in declared:
+            known = ", ".join(sorted(declared)) or "none declared"
+            raise PlanError(
+                f"step {step.id} uses actor {step.actor!r}, which is not in "
+                f"meta.actors ({known})"
+            )
+    # A plan is committed beside the code. A literal password in it is a leaked
+    # password, so a credential must arrive through ${ENV}. That check lives in
+    # load(), on the raw value before expansion.
+    for name, actor in plan.meta.actors.items():
+        if actor.login and not actor.password:
+            raise PlanError(
+                f"actor {name!r} has a login but no password; add "
+                "password: ${ENV_VAR}"
+            )
+
+
+#: Recognised keys inside an ``api`` assertion mapping. An unknown key is a
+#: plan typo that would otherwise be ignored silently — the assertion would run
+#: with a default it never asked for.
+API_ASSERTION_KEYS = ("method", "path", "status", "path_exact", "path_regex")
+
+
+def _validate_assertions(plan: Plan) -> None:
+    for step in plan.steps:
+        for kind, value, _on in step.assertions:
+            if kind == "api" and isinstance(value, dict):
+                unknown = [key for key in value if key not in API_ASSERTION_KEYS]
+                if unknown:
+                    raise PlanError(
+                        f"step {step.id}: api assertion has unknown key(s) "
+                        f"{', '.join(map(repr, unknown))}; choose from "
+                        f"{', '.join(API_ASSERTION_KEYS)}"
+                    )
+                if value.get("path_exact") and value.get("path_regex"):
+                    raise PlanError(
+                        f"step {step.id}: api assertion cannot set both path_exact "
+                        "and path_regex"
+                    )
 
 
 def _reject_cycles(plan: Plan) -> None:
@@ -230,7 +440,7 @@ def _validate_bindings(plan: Plan) -> None:
     """
     bound: set[str] = set()
     for step in plan.steps:
-        for kind, value in step.assertions:
+        for kind, value, _on in step.assertions:
             for placeholder in _referenced_vars(value):
                 if placeholder not in bound:
                     raise PlanError(
@@ -285,7 +495,7 @@ def lint(path: str | Path) -> dict[str, Any]:
     plan = load(path)
     warnings: list[str] = []
     for step in plan.steps:
-        kinds = [kind for kind, _ in step.assertions]
+        kinds = [kind for kind, _, _on in step.assertions]
         if not kinds:
             warnings.append(
                 f"step {step.id} has no expect: entries, so it can only ever be BLOCKED"
@@ -295,6 +505,17 @@ def lint(path: str | Path) -> dict[str, Any]:
                 f"step {step.id} only requires a screenshot; consider adding a "
                 "checkable assertion so a pass means more than a file existing"
             )
+        if step.strength == "weak" and not step.weak_reason:
+            warnings.append(
+                f"step {step.id} is marked strength: weak but gives no weak_reason; "
+                "the report prints it, so say why the evidence needs a human"
+            )
+    weak_total = sum(1 for step in plan.steps if step.strength == "weak")
+    if weak_total:
+        warnings.append(
+            f"{weak_total} step(s) are marked strength: weak; the report states how "
+            "many passes rest on evidence a human still has to read"
+        )
     return {
         "status": "ok",
         "plan": plan.meta.app,
@@ -320,6 +541,14 @@ meta:
   base_url: {url}
   language: en
   # workbook: ./Checklist.xlsx      # optional: annotate an existing checklist
+  # actors:                          # optional: more than one browser identity
+  #   admin:
+  #     as: admin@example.test
+  #     login: ${{ADMIN_PASSWORD}}     # secrets come from the environment
+  #   proctor:
+  #     as: proctor@example.test
+  #     login: ${{PROCTOR_PASSWORD}}
+  #   anon: {{}}                      # no `as` means a clean, logged-out session
 
 known_behaviors:
   # Quirks that look like bugs but are known. Cite them with holoqa_note so a
@@ -374,12 +603,43 @@ FORMAT_REFERENCE = {
         "url_matches": "regex against the captured URL (needs a dom capture)",
         "text_contains": "substring of visible page text (needs a dom capture)",
         "text_not_contains": "text that must be absent (needs a dom capture)",
-        "api": "{method, path, status} — status may be an int or a list",
+        "api": (
+            "{method, path, status} — status may be an int or a list. `path` is "
+            "matched on path segments; add `path_exact: true` or "
+            "`path_regex: <regex>`. The query string is ignored."
+        ),
         "json": "subset or JSONPath match against the last api capture body",
+        "header": (
+            "a response header on an api capture: either a name alone (must be "
+            "present) or {name, contains|equals|matches}"
+        ),
+        "file": (
+            "the contents of a download: {name_matches, size_gt, size_lt, "
+            "contains, magic} — every key given must hold"
+        ),
         "screenshot": "'required' — a non-empty image exists for this step",
         "changed": "'dom' or 'api' — two captures, taken apart, must differ",
         "capture": "{name: $.json.path} — binds a value for later steps",
     },
+    "scoping": (
+        "By default an assertion reads the most recent capture of its kind. Add "
+        "`scope: <name>` to pin it to a specific capture when a step makes more "
+        "than one call: `- {json: {status: PENDING}, scope: create}`. The name "
+        "matches the capture's file stem or target."
+    ),
+    "requires": (
+        "Preconditions, checked by HoloQA before the step's assertions. "
+        "`requires: [{api: {method: GET, path: /api/fixtures, status: 200}}]` — "
+        "if it is not satisfied the step is BLOCKED with the plan's own cause, "
+        "and the report groups such steps by root cause. This is how a step "
+        "reports 'the fixture is missing' without you having to write it in "
+        "prose."
+    ),
+    "strength": (
+        "`strength: weak` plus `weak_reason: <why>` marks a step whose PASS "
+        "still needs a human to read the evidence. The report states how many "
+        "passes are weak, so a green checklist does not overstate itself."
+    ),
     "quoting": (
         "Inside a flow mapping { }, quote values containing {braces} or "
         '[brackets]: path: "/api/orders/{order_id}", capture: { id: "$.items[0].id" }'
@@ -389,6 +649,17 @@ FORMAT_REFERENCE = {
         "depends_on must point at steps that appear earlier in the file.",
         "Anything not expressible as an assertion is BLOCKED with a cause, never a soft pass.",
     ],
+    "actors": (
+        "A step that needs a second identity declares it. meta.actors maps a name "
+        "to a browser identity; step.actor selects it; each actor gets its own "
+        "isolated browser session, so an admin step and a proctor step no longer "
+        "share one cookie jar. Credentials must come from the environment "
+        "(password: ${ADMIN_PASSWORD}) — a literal password in a plan is refused, "
+        "because the plan is committed beside the code. An actor with no `as` is "
+        "anonymous. Evidence is tagged with the session that produced it, and a "
+        "step whose evidence was captured in the wrong session is BLOCKED, never "
+        "counted as a pass."
+    ),
     "template": TEMPLATE.format(app="myapp", url="https://staging.example"),
 }
 

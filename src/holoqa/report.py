@@ -61,6 +61,54 @@ def _cause(step: dict[str, Any]) -> str:
     return (step.get("verdict_note") or step.get("note") or "").strip()
 
 
+def _plan_for(run: Run, data: dict[str, Any]) -> Any:
+    """Load the plan a run was started from, or ``None`` if it moved."""
+    from holoqa import plan as plan_module
+
+    try:
+        return plan_module.load(data["plan_path"])
+    except Exception:
+        return None
+
+
+def _known_defect_steps(plan: Any, data: dict[str, Any]) -> dict[str, str]:
+    """Steps that failed, where the plan already knew the cause.
+
+    A ``known_defect`` in ``known_behaviors`` says a failure here is expected.
+    Reporting it beside a genuine regression is how a team learns to ignore the
+    report — and it is exactly the wrong signal for a release decision, where
+    the question is "did anything get *worse*". Returns step id -> KB id.
+    """
+    if plan is None:
+        return {}
+    out: dict[str, str] = {}
+    for entry in plan.known_behaviors:
+        if entry.verdict_hint != "known_defect":
+            continue
+        for step_id in entry.applies_to:
+            verdict = data["steps"].get(step_id, {}).get("verdict")
+            if verdict in {FAIL, BLOCKED}:
+                out[step_id] = entry.id
+    return out
+
+
+def _weak_steps(plan: Any, data: dict[str, Any]) -> list[tuple[str, str]]:
+    """Steps the plan itself marked as proving little, with the reason.
+
+    A PASS on a weak step is honest but not strong evidence, and a reader of the
+    report cannot tell the two apart from the verdict alone. Saying "12 of 31
+    passes are weak" is the difference between a checklist that looks green and
+    one that is green.
+    """
+    if plan is None:
+        return []
+    out: list[tuple[str, str]] = []
+    for step in plan.steps:
+        if step.strength == "weak":
+            out.append((step.id, step.weak_reason or "no reason given"))
+    return out
+
+
 def _counts(data: dict[str, Any]) -> dict[str, int]:
     counts = {PASS: 0, FAIL: 0, BLOCKED: 0}
     for step in data["steps"].values():
@@ -74,6 +122,9 @@ def markdown(run: Run) -> Path:
     data = run.read()
     counts = _counts(data)
     meta = data.get("meta", {})
+    plan = _plan_for(run, data)
+    known = _known_defect_steps(plan, data)
+    weak = _weak_steps(plan, data)
     lines = [
         f"# Release checklist — {data.get('app', 'application')}",
         "",
@@ -87,11 +138,22 @@ def markdown(run: Run) -> Path:
         "",
         f"**{counts[PASS]} passed · {counts[FAIL]} failed · {counts[BLOCKED]} blocked — "
         f"decision: {decision(counts)}**",
+    ]
+    if weak:
+        passing_weak = [
+            step_id for step_id, _ in weak
+            if data["steps"].get(step_id, {}).get("verdict") == PASS
+        ]
+        lines.append(
+            f"**Evidence strength: {len(passing_weak)} of {counts[PASS]} passes are "
+            f"marked weak** — they need a human to read the evidence."
+        )
+    lines += [
         "",
         "One failed or blocked step holds the release.",
         "",
-        "| Step | Title | Verdict | Decided by | Evidence | Note |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| Step | Title | Actor | Verdict | Decided by | Evidence | Note |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
 
     for step_id, step in data["steps"].items():
@@ -99,8 +161,11 @@ def markdown(run: Run) -> Path:
         # A derived failure reason first, otherwise the tester's own note. A
         # passing step never inherits the message from a verdict it replaced.
         note = _cause(step).replace("|", "\\|") or "—"
+        # Which identity produced the evidence, when the run used more than one.
+        actors = sorted({item["actor"] for item in step["observations"] if item.get("actor")})
+        actor = ", ".join(actors) or "—"
         lines.append(
-            f"| {step_id} | {step['title']} | {_STATUS_MARK.get(step.get('verdict'), '—')} "
+            f"| {step_id} | {step['title']} | {actor} | {_STATUS_MARK.get(step.get('verdict'), '—')} "
             f"| {step.get('decided_by', '—')} | {evidence} | {note} |"
         )
 
@@ -121,6 +186,50 @@ def markdown(run: Run) -> Path:
     cited = sorted({ref for step in data["steps"].values() for ref in step.get("kb_refs", [])})
     if cited:
         lines += ["", "## Known behaviours cited", "", ", ".join(f"`{ref}`" for ref in cited)]
+
+    # Separate an expected failure from a new one. A release reviewer is asking
+    # "did anything get worse", so a defect the plan already documents must not
+    # sit in the same list as a fresh regression.
+    failed = [
+        (step_id, step) for step_id, step in data["steps"].items()
+        if step.get("verdict") in {FAIL, BLOCKED}
+    ]
+
+    # Group blocked steps by their declared root cause. "64 blocked" is not
+    # actionable; "41 blocked on the same missing fixture" is. Only a
+    # `requires:` failure has a machine-readable cause — an agent's prose
+    # BLOCKED stays in the per-step table where it belongs.
+    causes: dict[str, list[str]] = {}
+    for step_id, step in failed:
+        cause = step.get("blocked_cause") or ""
+        if cause and step_id not in known:
+            causes.setdefault(cause, []).append(step_id)
+    if causes:
+        lines += ["", "## Blocked by root cause", ""]
+        for cause, step_ids in sorted(causes.items(), key=lambda kv: -len(kv[1])):
+            lines.append(f"- **{len(step_ids)} step(s)** — {cause}")
+            lines.append(f"  - {', '.join(f'`{sid}`' for sid in step_ids)}")
+
+    if known or failed:
+        lines += ["", "## New failures", ""]
+        new = [(sid, step) for sid, step in failed if sid not in known]
+        if new:
+            for step_id, step in new:
+                lines.append(
+                    f"- `{step_id}` {step['title']} — {step.get('verdict')}: "
+                    f"{_cause(step) or '—'}"
+                )
+        else:
+            lines.append("- none")
+
+        if known:
+            lines += ["", "## Known defects", ""]
+            for step_id, kb_id in sorted(known.items()):
+                step = data["steps"][step_id]
+                lines.append(
+                    f"- `{step_id}` {step['title']} — {step.get('verdict')} "
+                    f"(expected, `{kb_id}`): {_cause(step) or '—'}"
+                )
 
     path = run.out_dir / "report.md"
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -10,6 +10,7 @@ no network connection of its own.
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,10 @@ def holoqa_run_start(
             "base_url": base_url or plan.meta.base_url,
         },
     )
+    # Apply the plan's browser options for this process before any capture.
+    observe_module.set_browser_options(
+        plan.meta.browser.ignore_https_errors, plan.meta.browser.args
+    )
     os.environ["HOLOQA_RUN_DIR"] = str(run.dir)
     status = run.status(plan)
     return {
@@ -125,6 +130,8 @@ def holoqa_run_status(run_dir: str = "") -> dict[str, Any]:
     next_step = status["next_step"]
     if next_step:
         step = plan.step(next_step)
+        actor_name = plan.actor_for(next_step)
+        actor = plan.actor(actor_name)
         status["next"] = {
             "id": step.id,
             "title": step.title,
@@ -132,9 +139,53 @@ def holoqa_run_status(run_dir: str = "") -> dict[str, Any]:
             "do": step.do,
             "expect": step.expect,
             "depends_on": step.depends_on,
+            "actor": actor_name,
+            # The identifier only. A password is never returned over MCP; the
+            # agent authenticates with it out of band, and HoloQA's redaction
+            # covers the capture if it ever reaches a request body.
+            "actor_login": (actor.login or actor.as_) if actor else "",
             "unmet_dependencies": run.blocked_dependencies(plan, step.id),
         }
+    status["actors"] = sorted(plan.meta.actors) or [plan.default_actor]
     return status
+
+
+def _parse_headers(raw: str) -> dict[str, str]:
+    """Parse the `headers` argument of an api capture.
+
+    Accepts a JSON object. Kept strict: a header typo silently dropped would
+    mean a request that never tested what the plan asked for.
+    """
+    if not (raw or "").strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError as error:
+        raise GuardrailError(
+            f"headers must be a JSON object of name -> value: {error}"
+        ) from error
+    if not isinstance(parsed, dict):
+        raise GuardrailError("headers must be a JSON object of name -> value")
+    return {str(key): str(item) for key, item in parsed.items()}
+
+
+def _actor_session(plan: plan_module.Plan, step_id: str, requested: str) -> str:
+    """Resolve which agent-browser session a capture must use.
+
+    The plan decides, not the caller. A step that names an actor is captured in
+    that actor's session and nowhere else; the ``actor`` argument exists so the
+    agent can be explicit and get a clear error, not so it can choose a session
+    the plan did not ask for. Letting the caller pick would put the identity a
+    test ran under outside the reviewed contract — the same class of hole as
+    letting it pick a verdict.
+    """
+    expected = plan.actor_for(step_id)
+    if not requested or requested == expected:
+        return expected
+    raise GuardrailError(
+        f"step {step_id} runs as actor {expected!r}; it cannot be captured as "
+        f"{requested!r}. The plan decides the identity."
+    )
 
 
 def holoqa_observe(
@@ -144,8 +195,13 @@ def holoqa_observe(
     method: str = "GET",
     path: str = "",
     body: str = "",
+    headers: str = "",
     seconds: int = observe_module.SSE_SECONDS,
     slug: str = "",
+    actor: str = "",
+    wait_for: str = "",
+    settle_ms: int = 0,
+    timeout_ms: int = 0,
     run_dir: str = "",
 ) -> dict[str, Any]:
     """Capture evidence for a step. HoloQA performs the capture, not you.
@@ -157,53 +213,80 @@ def holoqa_observe(
     api         in-page fetch of `path` with the browser's own session
     sse         holds `path` open for `seconds` and summarizes the events
     download    arms a blob interceptor, clicks `selector`, saves the file
+
+    The step's actor decides which browser session is used. Passing `actor` that
+    does not match the plan is an error, not an override.
+
+    `headers` is a JSON object of extra request headers for an api capture, so a
+    ranged or conditional request can be tested.
+
+    `wait_for` is JavaScript that must evaluate truthy before the capture, and
+    `settle_ms` is a pause after that. Both exist because a plan that says
+    "wait 3-5 seconds" in prose is a plan whose timing is not enforced, and a
+    guard-driven redirect would otherwise be captured mid-flight. Prefer
+    `wait_for` — a condition, not a duration — and raise `timeout_ms` if the
+    default is too short.
     """
     run = run_module.find(run_dir or None)
     plan = _plan_for(run)
     if not plan.has_step(step_id):
         raise GuardrailError(f"step {step_id} is not in this plan")
 
+    session = _actor_session(plan, step_id, actor)
+
+    if wait_for:
+        observe_module.wait_for(wait_for, session=session, timeout_ms=timeout_ms)
+    if settle_ms:
+        observe_module.settle(settle_ms)
+
     name = run_module.slugify(slug or path or selector or kind)
     stem = f"step-{run_module.slugify(step_id)}-{name}"
 
     if kind == "screenshot":
         destination = run.evidence_dir / f"{stem}.png"
-        summary = observe_module.screenshot(destination, selector)
+        summary = observe_module.screenshot(destination, selector, session=session)
         target = selector or "<page>"
     elif kind == "dom":
         destination = run.evidence_dir / f"{stem}.json"
-        summary = observe_module.dom(destination)
+        summary = observe_module.dom(destination, session=session)
         target = summary.get("url", "")
     elif kind == "api":
         if not path:
             raise GuardrailError("api capture needs a path")
         target = _resolve_url(run, path)
         destination = run.evidence_dir / f"{stem}.json"
-        summary = observe_module.api(destination, method, target, body or None)
+        extra = _parse_headers(headers)
+        summary = observe_module.api(
+            destination, method, target, body or None, session=session, headers=extra
+        )
     elif kind == "sse":
         if not path:
             raise GuardrailError("sse capture needs a path")
         target = _resolve_url(run, path)
         destination = run.evidence_dir / f"{stem}.json"
-        summary = observe_module.sse(destination, target, seconds)
+        summary = observe_module.sse(destination, target, seconds, session=session)
     elif kind == "download":
         if not selector:
             raise GuardrailError("download capture needs the selector that starts it")
-        observe_module.arm_download()
-        observe_module.run_cli(["click", selector])
+        observe_module.arm_download(session=session)
+        observe_module.run_cli(["click", selector], session=session)
         destination = run.evidence_dir / f"{stem}.bin"
-        summary = observe_module.collect_download(destination)
+        summary = observe_module.collect_download(destination, session=session)
         target = selector
     else:
         raise GuardrailError(
             f"unknown capture kind {kind!r}; use screenshot, dom, api, sse, or download"
         )
 
-    record = run.attach(step_id, kind=kind, path=destination, target=target, summary=summary)
+    record = run.attach(
+        step_id, kind=kind, path=destination, target=target, summary=summary,
+        actor=session,
+    )
     return {
         "status": "captured",
         "step": step_id,
         "kind": kind,
+        "actor": session,
         "file": record["file"],
         "sha256": record["sha256"][:16],
         "bytes": record["bytes"],

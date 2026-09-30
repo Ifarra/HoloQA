@@ -54,6 +54,17 @@ steps:
     title: Step requiring change
     expect:
       - changed: dom
+  - id: S4
+    stage: S
+    title: Step with a declared environment cause
+    blocked_if: the service is disabled in this environment
+    expect:
+      - api: { method: GET, path: /disabled, status: 200 }
+  - id: S5
+    stage: S
+    title: Path matching must not accept a lookalike endpoint
+    expect:
+      - api: { method: GET, path: /disabled, status: 200 }
 """
 
 
@@ -135,6 +146,52 @@ def selftest() -> int:
                 f"guardrail 9: uncaptured api assertion should BLOCK, got {outcome}")
         lines.append("ok   guardrail 9  uncaptured assertion -> BLOCKED, not FAIL")
 
+        # blocked_if: a violated assertion on a step that declared an environment
+        # cause must report BLOCKED, and must keep the violation visible.
+        blocked_evidence = run.evidence_dir / "step-s4-disabled.json"
+        blocked_evidence.write_text(
+            json.dumps({
+                "request": {"method": "GET", "url": "http://localhost:0/disabled", "body": None},
+                "status": 503, "ok": False, "headers": {}, "elapsed_ms": 3,
+                "body": None, "body_text": None,
+            }),
+            encoding="utf-8",
+        )
+        run.attach("S4", kind="api", path=blocked_evidence)
+        outcome, results, _ = verdict_module.evaluate(plan, run, "S4")
+        if outcome != BLOCKED:
+            raise SelftestFailure(
+                f"blocked_if: a declared environment cause should BLOCK, got {outcome}: {results}"
+            )
+        detail = next(item["detail"] for item in results if item["ok"] is None)
+        if "blocked_if" not in detail or "503" not in detail:
+            raise SelftestFailure(
+                f"blocked_if: the cause and the real violation must both survive, got {detail!r}"
+            )
+        run.set_verdict("S4", outcome, note=detail, assertions=results)
+        lines.append("ok   verdict      blocked_if downgrades a violation, keeps the detail")
+
+        # An api assertion must not be satisfied by an unrelated endpoint. This
+        # uses a step with no blocked_if, so the verdict it produces is the
+        # path-matching result alone.
+        lookalike = run.evidence_dir / "step-s5-lookalike.json"
+        lookalike.write_text(
+            json.dumps({
+                "request": {"method": "GET", "url": "http://localhost:0/disabled-archive", "body": None},
+                "status": 200, "ok": True, "headers": {}, "elapsed_ms": 3,
+                "body": None, "body_text": None,
+            }),
+            encoding="utf-8",
+        )
+        run.attach("S5", kind="api", path=lookalike)
+        outcome, _, _ = verdict_module.evaluate(plan, run, "S5")
+        if outcome != BLOCKED:
+            raise SelftestFailure(
+                f"api path: /disabled matched /disabled-archive; segment matching is broken "
+                f"(got {outcome})"
+            )
+        lines.append("ok   verdict      api path does not match a lookalike endpoint")
+
         # changed: identical captures must not satisfy it.
         for name in ("a", "b"):
             same = run.evidence_dir / f"step-s3-{name}.json"
@@ -177,7 +234,7 @@ def selftest() -> int:
         lines.append(_plan_refusal(
             workspace, "plan check   forward reference to an uncaptured variable",
             SELFTEST_PLAN + """
-  - id: S4
+  - id: S6
     title: uses an unbound variable
     expect:
       - api: { method: GET, path: "/a/{nope}", status: 200 }
@@ -186,7 +243,7 @@ def selftest() -> int:
         lines.append(_plan_refusal(
             workspace, "plan check   unknown assertion kind rejected",
             SELFTEST_PLAN + """
-  - id: S5
+  - id: S7
     title: invented assertion
     expect:
       - eventually_works: yes
@@ -309,6 +366,9 @@ def _print_agent(value: dict, as_json: bool) -> None:
         for item in value["providers"]:
             state = item["version"] if item["installed"] else "MISSING"
             print(f"{item['provider']:<10} {state}")
+            # Say what unattended means here, before someone picks it.
+            if item.get("unattended"):
+                print(f"{'':<10} unattended: {item['unattended']}")
         return
     agent = value.get("agent", {})
     holoqa = value.get("holoqa", {})
@@ -362,9 +422,20 @@ def agent_command(args: argparse.Namespace) -> int:
                 args.plan, request, tag=args.tag, commit=args.commit, tester=args.tester,
                 base_url=args.base_url, run_dir=args.run_dir,
             )
+            if getattr(args, "until_done", False):
+                run = run_module.find(result["holoqa"]["run_dir"])
+                result = agent_module.run_until_done(
+                    request, run, max_rounds=args.max_rounds, timeout_s=args.timeout,
+                )
         else:
             run = run_module.find(args.run_dir)
-            result = agent_module.launch(request, run, resume=True)
+            if getattr(args, "until_done", False):
+                result = agent_module.run_until_done(
+                    request, run, max_rounds=args.max_rounds, timeout_s=args.timeout,
+                    resume=True,
+                )
+            else:
+                result = agent_module.launch(request, run, resume=True, timeout_s=args.timeout)
         if args.package:
             result["package"] = report_module.package(run_module.find(result["holoqa"]["run_dir"]), strict=True)
         _print_agent(result, args.json)
@@ -414,6 +485,7 @@ def tui_command(args: argparse.Namespace) -> int:
                 run_dir=args.run_dir if not sandbox else str(sandbox.root / ".holoqa" / "runs" / "tui"),
                 tag=args.tag, commit=args.commit, tester=args.tester,
                 base_url=args.base_url or (sandbox.base_url if sandbox else ""),
+                resume=args.resume,
             ).run()
             return 0
         finally:
@@ -493,6 +565,10 @@ def main(argv: list[str] | None = None) -> int:
     tui.add_argument("--tester", default="")
     tui.add_argument("--base-url", default="")
     tui.add_argument("--retain-events", action="store_true")
+    tui.add_argument(
+        "--resume", action="store_true",
+        help="continue an existing --run-dir instead of creating a new run",
+    )
     agent = sub.add_parser("agent", help="run a coding agent through HoloQA")
     agent_sub = agent.add_subparsers(dest="agent_command", required=True)
     agent_providers = agent_sub.add_parser("providers", help="list supported coding agents")
@@ -518,6 +594,18 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--model", default="")
         command.add_argument("--run-dir", required=(name == "resume"), default="")
         command.add_argument("--package", action="store_true")
+        command.add_argument(
+            "--until-done", action="store_true",
+            help="keep resuming the agent while steps remain (stops on no progress)",
+        )
+        command.add_argument(
+            "--max-rounds", type=int, default=5,
+            help="cap on automatic resume rounds (default 5)",
+        )
+        command.add_argument(
+            "--timeout", type=int, default=0,
+            help="wall-clock seconds per round; 0 means no limit",
+        )
         command.add_argument("--retain-events", action="store_true", help="persist raw agent output in the run directory")
         command.add_argument("--json", action="store_true")
 

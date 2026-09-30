@@ -291,6 +291,7 @@ class HoloQATui(App[None]):
         commit: str = "",
         tester: str = "",
         base_url: str = "",
+        resume: bool = False,
         file_opener: Callable[[Path], None] | None = None,
         path_revealer: Callable[[Path], None] | None = None,
     ) -> None:
@@ -301,6 +302,7 @@ class HoloQATui(App[None]):
         self.plan_path = plan_path
         self.request = request
         self.run_dir = run_dir
+        self.resume = resume
         self.tag = tag
         self.commit = commit
         self.tester = tester
@@ -881,7 +883,15 @@ class HoloQATui(App[None]):
 
     @classmethod
     def _human_event(cls, channel: str, line: str) -> str:
-        """Turn provider protocol JSON into a compact, user-facing transcript."""
+        """Turn provider protocol JSON into a compact, user-facing transcript.
+
+        Two very different wire formats arrive here. Codex emits
+        ``item.started`` / ``item.completed`` with a nested ``item``. Claude
+        Code's ``--output-format stream-json`` emits ``assistant`` / ``user`` /
+        ``system`` / ``result`` envelopes carrying content blocks. Only the
+        first was understood, so a Claude run rendered every single line as
+        "Provider event: assistant" — technically true and useless to watch.
+        """
         try:
             event = json.loads(line)
         except (TypeError, ValueError):
@@ -890,7 +900,23 @@ class HoloQATui(App[None]):
             return cls._short(event)
         if event.get("type") == "error":
             return f"ERROR: {cls._short(event.get('message', event))}"
+
         event_type = event.get("type", "")
+
+        # ---- Claude Code stream-json -------------------------------------
+        if event_type in {"assistant", "user", "system", "result"}:
+            rendered = cls._claude_event(event)
+            if rendered is not None:
+                return rendered
+        if event_type == "rate_limit_event":
+            info = event.get("rate_limit_info")
+            if isinstance(info, dict):
+                status = info.get("status", "unknown")
+                kind = str(info.get("rateLimitType", "")).replace("_", " ")
+                return f"Rate limit {status}{f' ({kind})' if kind else ''}"
+            return "Rate limit update"
+
+        # ---- Codex item events -------------------------------------------
         simple = {
             "thread.started": "Session started",
             "turn.started": "Agent is thinking",
@@ -916,15 +942,104 @@ class HoloQATui(App[None]):
             arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
             step_id = arguments.get("step_id")
             if event_type == "item.started":
-                if tool == "holoqa_observe":
-                    return f"Capturing {arguments.get('kind', 'evidence')} for step {step_id}"
-                if tool == "holoqa_judge":
-                    return f"Evaluating assertions for step {step_id}"
-                if tool == "holoqa_run_status":
-                    return "Reading HoloQA run status"
-                return f"Calling {tool}"
+                return cls._tool_call_text(tool, arguments, step_id)
             return f"{tool} {('failed' if status == 'failed' else 'completed')}"
         return f"Provider event: {event_type or 'update'}"
+
+    @classmethod
+    def _tool_call_text(cls, tool: str, arguments: dict, step_id: object) -> str:
+        """One readable line for a tool invocation, HoloQA's tools first."""
+        short = tool.rsplit("__", 1)[-1] if "__" in tool else tool
+        if short == "holoqa_observe":
+            kind = arguments.get("kind", "evidence")
+            target = arguments.get("path") or arguments.get("selector") or ""
+            where = f" {target}" if target else ""
+            return f"Capturing {kind}{where} for step {step_id}"
+        if short == "holoqa_judge":
+            return f"Evaluating assertions for step {step_id}"
+        if short == "holoqa_run_status":
+            return "Reading HoloQA run status"
+        if short == "holoqa_block":
+            return f"Recording BLOCKED for step {step_id}"
+        if short == "holoqa_note":
+            return f"Annotating step {step_id}"
+        if short == "holoqa_run_start":
+            return "Starting a HoloQA run"
+        if short == "holoqa_run_package":
+            return "Packaging the run"
+        return f"Calling {short}"
+
+    @classmethod
+    def _claude_event(cls, event: dict) -> str | None:
+        """Render one Claude stream-json envelope, or ``None`` to fall through."""
+        kind = event.get("type")
+        if kind == "system":
+            subtype = event.get("subtype", "")
+            if subtype == "init":
+                model = event.get("model") or "unknown model"
+                tools = event.get("tools")
+                count = f", {len(tools)} tools" if isinstance(tools, list) else ""
+                return f"Session started ({model}{count})"
+            if subtype:
+                return f"Session {subtype.replace('_', ' ')}"
+            return "Session update"
+
+        if kind == "result":
+            subtype = event.get("subtype", "")
+            duration = event.get("duration_ms")
+            cost = event.get("total_cost_usd")
+            parts = [f"Run {subtype}" if subtype else "Run finished"]
+            if isinstance(duration, (int, float)):
+                parts.append(f"{duration / 1000:.1f}s")
+            if isinstance(cost, (int, float)):
+                parts.append(f"${cost:.4f}")
+            summary = event.get("result")
+            if isinstance(summary, str) and summary.strip():
+                parts.append(cls._short(summary))
+            return " · ".join(parts)
+
+        message = event.get("message") if isinstance(event.get("message"), dict) else {}
+        blocks = message.get("content")
+        if not isinstance(blocks, list):
+            return None
+
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                text = cls._short(block.get("text", ""))
+                if text:
+                    return f"Agent: {text}"
+            elif block_type == "thinking":
+                thought = cls._short(block.get("thinking", ""), 120)
+                if thought:
+                    return f"Agent is thinking: {thought}"
+            elif block_type == "tool_use":
+                tool = str(block.get("name", "tool"))
+                arguments = block.get("input") if isinstance(block.get("input"), dict) else {}
+                return cls._tool_call_text(tool, arguments, arguments.get("step_id"))
+            elif block_type == "tool_result":
+                text = cls._block_text(block)
+                if text:
+                    return f"Result: {cls._short(text)}"
+                return "Tool result received"
+        return None
+
+    @staticmethod
+    def _block_text(block: dict) -> str:
+        """Flatten a Claude tool_result block's content into plain text."""
+        content = block.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = [
+                str(item.get("text", ""))
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            ]
+            return " ".join(part for part in parts if part)
+        return ""
 
     def _render_activity(self) -> None:
         current_index = next(
@@ -949,6 +1064,96 @@ class HoloQATui(App[None]):
     def _refresh_activity(self) -> None:
         self._render_topbar()
         self._render_activity()
+        # The interval that already exists for the clock is also the right place
+        # to re-read the authoritative run record. Provider protocol is a hint;
+        # run.json is what HoloQA actually decided. Without this the step list
+        # only updated when the agent stopped, so a finished step showed as
+        # PENDING for the whole run.
+        self._sync_from_run()
+
+    def _sync_from_run(self) -> None:
+        """Re-read run.json and reflect it in the step list and verdict card.
+
+        Cheap by design — a small JSON file, once a second — and it makes the
+        dashboard correct for any provider, including one whose event stream the
+        transcript does not understand. The verdicts it shows are HoloQA's own,
+        never a guess made from provider output.
+        """
+        if not self.run_dir or self.demo_mode:
+            return
+        try:
+            run = run_module.find(self.run_dir)
+            data = run.read()
+        except (OSError, ValueError, run_module.GuardrailError):
+            return
+
+        stored = data.get("steps", {})
+        changed = False
+        updated: list[tuple[str, str, str]] = []
+        for step_id, title, verdict in self.state.steps:
+            # A step the agent is actively working on shows as IN PROGRESS until
+            # HoloQA records a verdict; run.json is the tiebreaker.
+            recorded = stored.get(step_id, {}).get("verdict")
+            resolved = recorded or verdict
+            updated.append((step_id, title, resolved))
+            if resolved != verdict:
+                changed = True
+        if changed:
+            self.state.steps = updated
+
+        counts = {"PASS": 0, "FAIL": 0, "BLOCKED": 0}
+        for _sid, _title, verdict in self.state.steps:
+            if verdict in counts:
+                counts[verdict] += 1
+        total = len(self.state.steps)
+        done = sum(counts.values())
+        # An incomplete run is not releasable, whatever the counts say.
+        decision = "HOLD" if done < total else (
+            "HOLD" if counts["FAIL"] or counts["BLOCKED"] else "RELEASE"
+        )
+        if self.state.decision != decision:
+            self.state.decision = decision
+            changed = True
+
+        # Evidence and assertions, so the detail panes fill in during the run
+        # rather than only at the end.
+        evidence: list[str] = []
+        artifacts: list[ArtifactItem] = []
+        assertions: dict[str, list[AssertionItem]] = {}
+        for step_id, step in stored.items():
+            for item in step.get("observations", []):
+                if not isinstance(item, dict):
+                    continue
+                filename = str(item.get("file", "evidence"))
+                evidence.append(f"{step_id}: {filename}")
+                artifacts.append(
+                    ArtifactItem(
+                        str(step_id), str(item.get("kind", "evidence")), filename,
+                        Path(self.run_dir) / "evidence" / filename,
+                        str(item.get("captured_at", "")), int(item.get("bytes", 0) or 0),
+                    )
+                )
+            if step.get("assertions"):
+                assertions[str(step_id)] = [
+                    AssertionItem(
+                        str(step_id), str(item.get("kind", "assertion")),
+                        item.get("ok") if item.get("ok") in {True, False, None} else None,
+                        str(item.get("detail", "No detail supplied")),
+                    )
+                    for item in step["assertions"] if isinstance(item, dict)
+                ]
+        if len(evidence) != len(self.state.evidence):
+            self.state.evidence = evidence
+            changed = True
+        if len(artifacts) != len(self.state.artifacts):
+            self.state.artifacts = artifacts
+            changed = True
+        if assertions:
+            self.state.assertions = assertions
+            changed = True
+
+        if changed and self.is_mounted:
+            self._render_state()
 
     def _handle_agent_line(self, channel: str, line: str) -> None:
         summary = self._human_event(channel, line)
@@ -965,14 +1170,34 @@ class HoloQATui(App[None]):
             source = "error"
         else:
             source = "agent"
-        arguments = item.get("arguments") if isinstance(item, dict) and isinstance(item.get("arguments"), dict) else {}
-        step_id = str(arguments["step_id"]) if arguments.get("step_id") is not None else None
+        step_id = self._event_step_id(event)
         self._append_log(summary, source=source, step_id=step_id)
         self._last_event_monotonic = time.monotonic()
         self.state.activity = "ERROR" if summary.startswith("ERROR:") else "RUNNING"
         self.state.activity_detail = summary
         self._apply_protocol_state(event)
         self._render_state()
+
+    @staticmethod
+    def _event_step_id(event: object) -> str | None:
+        """The step a provider event refers to, in either wire format."""
+        if not isinstance(event, dict):
+            return None
+        # Codex: item.arguments.step_id
+        item = event.get("item")
+        if isinstance(item, dict):
+            arguments = item.get("arguments")
+            if isinstance(arguments, dict) and arguments.get("step_id") is not None:
+                return str(arguments["step_id"])
+        # Claude: message.content[].input.step_id on a tool_use block
+        message = event.get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), list):
+            for block in message["content"]:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    arguments = block.get("input")
+                    if isinstance(arguments, dict) and arguments.get("step_id") is not None:
+                        return str(arguments["step_id"])
+        return None
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "transcript-search":
@@ -1138,6 +1363,14 @@ class HoloQATui(App[None]):
             self.state.groups = {stage.id: stage.title or stage.id for stage in plan.stages}
             self.state.step_groups = {step.id: step.stage for step in plan.steps if step.stage}
             self.selected_step_id = self.state.steps[0][0] if self.state.steps else None
+            # Resolve the run directory now, not at the end. The wrapper creates
+            # this exact path, and knowing it up front is what lets the dashboard
+            # read verdicts as they land instead of only when the agent exits.
+            if not self.resume and not self.run_dir:
+                self.run_dir = str(
+                    self.request.cwd.resolve() / ".holoqa" / "runs" /
+                    f"{datetime.now().strftime('%Y%m%d-%H%M')}-{plan.meta.app}"
+                )
             self._render_state()
         except Exception as error:
             self._set_safety(f"Cannot load plan: {error}")
@@ -1171,10 +1404,17 @@ class HoloQATui(App[None]):
             cancel_event=self._cancel_event,
         )
         try:
-            result = agent_module.create_and_launch(
-                self.plan_path, request, tag=self.tag, commit=self.commit,
-                tester=self.tester, base_url=self.base_url, run_dir=self.run_dir,
-            )
+            if self.resume and self.run_dir:
+                # Continue the run the user pointed at. `create_and_launch`
+                # would call Run.create and fail with "run already exists",
+                # which is why the TUI could not be opened on a live run.
+                run = run_module.find(self.run_dir)
+                result = agent_module.launch(request, run, resume=True)
+            else:
+                result = agent_module.create_and_launch(
+                    self.plan_path, request, tag=self.tag, commit=self.commit,
+                    tester=self.tester, base_url=self.base_url, run_dir=self.run_dir,
+                )
             self.call_from_thread(self._finish_agent, result)
         except Exception as error:
             self.call_from_thread(self._handle_worker_error, str(error))

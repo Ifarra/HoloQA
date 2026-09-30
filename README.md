@@ -81,7 +81,7 @@ Claude Code / Cursor        the AI. Reads pages, decides what to click,
 HoloQA is not on PyPI. Install it from this repository.
 
 ```bash
-uv tool install git+https://github.com/USER/holoqa      # provides `holoqa`
+uv tool install git+https://github.com/Ifarra/HoloQA      # provides `holoqa`
 npm install -g agent-browser                            # the browser driver
 ```
 
@@ -116,7 +116,7 @@ MCP client entry:
 <summary>Running from a clone instead</summary>
 
 ```bash
-git clone https://github.com/USER/holoqa && cd holoqa && uv sync
+git clone https://github.com/Ifarra/HoloQA && cd HoloQA && uv sync
 uv run holoqa doctor
 ```
 
@@ -217,7 +217,14 @@ steps:
 | `depends_on` | steps that must PASS first; must appear earlier in the file |
 | `route` / `do` | human-readable context for the agent — never executed |
 | `expect` | the assertions HoloQA evaluates |
-| `blocked_if` | when to call it BLOCKED rather than FAIL |
+| `blocked_if` | when an assertion is **violated**, report BLOCKED carrying this cause instead of FAIL |
+
+`blocked_if` is evaluated, not decorative. A step that declares one and then
+fails its assertions is BLOCKED, because the plan itself says the environment
+may not be able to reach that step — a feature flag that is off is not a defect
+in the product. The violation is not hidden: the assertion's real detail is kept
+in the report, after the plan's cause. A step with no `blocked_if` still reports
+FAIL, so the downgrade is per-step and deliberate.
 
 ### Variables
 
@@ -251,6 +258,19 @@ language.
 | `screenshot` | `required` — a non-empty image exists | a `screenshot` capture |
 | `changed` | `dom` or `api` — two captures, taken apart, must differ | two captures |
 | `capture` | `{name: $.json.path}` — binds a value for later steps | an `api` capture |
+
+**`api` path matching.** `path` is matched on path *segments*, so `/api/orders`
+matches `/api/orders`, `/api/orders?page=2` and `/api/orders/88`, but never
+`/api/orders-archive`. The query string is ignored. When that is still not
+strict enough:
+
+```yaml
+- api: { method: GET, path: /api/orders, path_exact: true, status: 200 }
+- api: { method: GET, path_regex: "^/api/orders/[0-9]+$", status: 200 }
+```
+
+An unrecognised key inside an `api` assertion is refused at load time, so a
+typo cannot silently run with a default you never asked for.
 
 **Negative tests** use a status list:
 
@@ -594,6 +614,20 @@ JavaScript payloads are base64-encoded so no quoting survives to reach the
 shell. If you shell out to HoloQA from Git Bash, note that MSYS rewrites
 `/api/...` arguments into Windows paths — prefix with `MSYS_NO_PATHCONV=1`.
 
+**Windows: `uv tool install` fails with a hardlink error (`os error 396`).**
+On a OneDrive- or cloud-synced checkout, uv cannot hardlink across the synced
+filesystem. Set the link mode to copy:
+
+```bash
+UV_LINK_MODE=copy uv tool install git+https://github.com/Ifarra/HoloQA
+```
+
+**`agent-browser` appears to hang under a pipe.** Its daemon inherits the write
+end of a piped stdout, so a named session can print its result and never exit
+under `| tail`. HoloQA is not affected — it captures CLI output through a
+temporary file rather than a pipe — but if you are driving `agent-browser`
+yourself, redirect to a file instead of piping.
+
 ---
 
 ## TUI activity and transcript
@@ -636,8 +670,10 @@ useless.
   evidence; mark them clearly in the plan.
 - **Plans are per-application and hand-written.** That is a deliberate cost:
   the spec is what stops the agent grading its own homework.
-- **`text_contains` on a truncated page returns BLOCKED**, not FAIL. Page text
-  is captured up to 20k characters; absence cannot be proven beyond that.
+- **`text_contains` and `text_not_contains` on a truncated page return BLOCKED**,
+  not FAIL and not PASS. Page text is captured up to 20k characters; beyond that
+  neither presence nor absence can be proven, and a guess in either direction
+  would be the exact failure this tool exists to prevent.
 - **Single local run at a time.** No concurrency, no queue, no shared state.
 
 ---
@@ -646,7 +682,7 @@ useless.
 
 ```bash
 uv sync --dev
-uv run pytest -q              # 81 tests (3 real-browser tests are opt-in)
+uv run pytest -q              # 94 tests (3 real-browser tests are opt-in)
 uv run holoqa selftest        # 18 guardrail checks
 uv run holoqa validate examples/wolvesight.plan.yaml
 # Optional: run the three real-browser tests against an isolated session.

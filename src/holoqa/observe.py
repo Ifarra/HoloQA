@@ -29,6 +29,8 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,32 @@ SSE_SECONDS = 20
 
 class CaptureError(RuntimeError):
     """The capture did not happen. Never silently degraded into a verdict."""
+
+
+#: Browser flags the current plan asked for, from ``meta.browser``. Module-level
+#: because HoloQA serves one run at a time over stdio, and threading a plan
+#: object through every capture helper would add a parameter that only ever
+#: carries one value.
+_BROWSER_ARGS: list[str] = []
+
+
+def set_browser_options(ignore_https_errors: bool = False, args: list[str] | None = None) -> None:
+    """Apply ``meta.browser`` for this process.
+
+    A staging host with a self-signed certificate is a property of the
+    application under test, so it belongs in the plan beside that application
+    rather than in an environment variable someone has to remember.
+    """
+    global _BROWSER_ARGS
+    flags: list[str] = []
+    if ignore_https_errors:
+        flags.append("--ignore-https-errors")
+    flags.extend(args or [])
+    _BROWSER_ARGS = flags
+
+
+def _browser_args() -> list[str]:
+    return _BROWSER_ARGS
 
 
 # --------------------------------------------------------------- agent-browser
@@ -55,41 +83,90 @@ def _binary() -> str:
     return found
 
 
-def run_cli(args: list[str], *, timeout: int = 120) -> str:
+def run_cli(
+    args: list[str],
+    *,
+    timeout: int = 120,
+    session: str = "",
+    browser_args: list[str] | None = None,
+) -> str:
     """Invoke agent-browser and return stdout.
 
     On Windows the resolved binary is a ``.cmd``; CreateProcess cannot execute
     one directly, so it goes through ``cmd /c``. Arguments are passed as a list
     so the runtime quotes them.
+
+    ``session`` isolates the call in its own agent-browser session, which is how
+    a multi-actor plan keeps one identity's cookies out of another's.
+
+    It is passed as the ``AGENT_BROWSER_SESSION`` environment variable rather
+    than the ``--session`` flag. agent-browser 0.27.0 rejects the flag before a
+    subcommand ("unexpected browser command: --session") and hangs on it, and the
+    environment variable is the mechanism its own documentation and test suite
+    use. The value is scoped to this one subprocess, so it cannot leak into a
+    later capture.
+
+    Output goes to a temporary *file*, not a pipe. agent-browser spawns a
+    long-lived daemon; when stdout is a pipe the daemon inherits the write end
+    and the parent never sees EOF, so a named session hangs even though it
+    printed its result. This was observed on Windows with agent-browser 0.27.0:
+    the same command with a piped stdout never returned, while redirecting to a
+    file completed in two seconds. Reading a file sidesteps it entirely.
     """
     binary = _binary()
+    args = list(args)
     command = [binary, *args]
     if os.name == "nt" and binary.lower().endswith((".cmd", ".bat")):
         command = ["cmd", "/c", binary, *args]
-    try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding="utf-8",
-            errors="replace",
+    environment = dict(os.environ)
+    if session:
+        environment["AGENT_BROWSER_SESSION"] = session
+    # Plan-declared browser options travel as the documented env var, so they
+    # apply to the browser the daemon already runs rather than only to this
+    # invocation. A self-signed staging certificate is a property of the
+    # application under test, not of one command.
+    merged_args = list(browser_args or []) + list(_browser_args())
+    if merged_args:
+        existing = environment.get("AGENT_BROWSER_ARGS", "").strip()
+        environment["AGENT_BROWSER_ARGS"] = (
+            f"{existing} {' '.join(merged_args)}".strip()
         )
-    except subprocess.TimeoutExpired as error:
-        raise CaptureError(f"agent-browser timed out after {timeout}s: {' '.join(args[:2])}") from error
+    handle, capture = tempfile.mkstemp(prefix="holoqa-cli-", suffix=".out")
+    os.close(handle)
+    try:
+        with open(capture, "wb") as sink:
+            try:
+                completed = subprocess.run(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=sink,
+                    stderr=subprocess.STDOUT,
+                    timeout=timeout,
+                    env=environment,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise CaptureError(
+                    f"agent-browser timed out after {timeout}s: {' '.join(args[:2])}"
+                ) from error
+        raw = Path(capture).read_bytes().decode("utf-8", errors="replace")
+    finally:
+        try:
+            os.unlink(capture)
+        except OSError:
+            pass
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
+        detail = raw.strip()
         raise CaptureError(f"agent-browser {args[0]} failed: {detail or 'no output'}")
-    return (completed.stdout or "").strip()
+    return raw.strip()
 
 
-def evaluate(js: str, *, timeout: int = 120) -> Any:
+def evaluate(js: str, *, timeout: int = 120, session: str = "") -> Any:
     """Run JavaScript in the page and return its decoded result.
 
     The payload is base64-wrapped so no quoting survives to reach ``cmd``.
     """
     encoded = base64.b64encode(js.encode("utf-8")).decode("ascii")
-    output = run_cli(["eval", f"eval(atob('{encoded}'))"], timeout=timeout)
+    output = run_cli(["eval", f"eval(atob('{encoded}'))"], timeout=timeout, session=session)
     if output.startswith("✗"):
         raise CaptureError(f"page rejected eval: {output}")
     value: Any = output
@@ -142,7 +219,9 @@ def redact_text(text: str | None) -> str | None:
 # ------------------------------------------------------------------- captures
 
 
-def screenshot(destination: Path, selector: str = "", full_page: bool = True) -> dict[str, Any]:
+def screenshot(
+    destination: Path, selector: str = "", full_page: bool = True, *, session: str = ""
+) -> dict[str, Any]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     args = ["screenshot"]
     if selector:
@@ -150,7 +229,7 @@ def screenshot(destination: Path, selector: str = "", full_page: bool = True) ->
     args.append(str(destination))
     if full_page and not selector:
         args.append("--full")
-    run_cli(args)
+    run_cli(args, session=session)
     if not destination.is_file() or destination.stat().st_size == 0:
         raise CaptureError(f"screenshot was not produced: {destination}")
     return {"selector": selector or "<page>", "full_page": full_page and not selector}
@@ -170,14 +249,14 @@ _DOM_JS = """
 """
 
 
-def dom(destination: Path) -> dict[str, Any]:
+def dom(destination: Path, *, session: str = "") -> dict[str, Any]:
     """Capture URL, title, and visible text as a compact JSON record.
 
     Deliberately not an accessibility snapshot: the prior tool found that
     snapshots of report and findings pages flood the caller's context. The
     caller gets a summary; the full text lands on disk as evidence.
     """
-    result = evaluate(_DOM_JS)
+    result = evaluate(_DOM_JS, session=session)
     if isinstance(result, str):
         result = json.loads(result)
     if not isinstance(result, dict):
@@ -196,10 +275,13 @@ _API_JS = """
   const method = %(method)s;
   const url = %(url)s;
   const body = %(body)s;
+  const extra = %(headers)s;
   const started = Date.now();
-  const init = { method, credentials: 'include', headers: { accept: 'application/json' } };
+  const init = { method, credentials: 'include', headers: Object.assign({ accept: 'application/json' }, extra) };
   if (body !== null) {
-    init.headers['content-type'] = 'application/json';
+    if (!init.headers['content-type'] && !init.headers['Content-Type']) {
+      init.headers['content-type'] = 'application/json';
+    }
     init.body = body;
   }
   let response, text = '', error = null;
@@ -232,14 +314,24 @@ def api(
     method: str,
     url: str,
     body: str | None = None,
+    *,
+    session: str = "",
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Capture an API exchange from inside the page, with its session."""
+    """Capture an API exchange from inside the page, with its session.
+
+    ``headers`` adds request headers beyond ``accept``. This is what makes a
+    conditional or ranged request testable — ``Range: bytes=0-99`` returning 206
+    versus an unsatisfiable range returning 416 was previously impossible to
+    express, because the fetch only ever sent two headers.
+    """
     js = _API_JS % {
         "method": json.dumps(method.upper()),
         "url": json.dumps(url),
         "body": json.dumps(body) if body is not None else "null",
+        "headers": json.dumps(headers or {}),
     }
-    result = evaluate(js)
+    result = evaluate(js, session=session)
     if isinstance(result, str):
         result = json.loads(result)
     if not isinstance(result, dict):
@@ -298,10 +390,12 @@ _SSE_JS = """
 """
 
 
-def sse(destination: Path, url: str, seconds: int = SSE_SECONDS) -> dict[str, Any]:
+def sse(
+    destination: Path, url: str, seconds: int = SSE_SECONDS, *, session: str = ""
+) -> dict[str, Any]:
     """Hold an SSE stream open briefly and record what arrived."""
     js = _SSE_JS % {"url": json.dumps(url), "seconds": int(seconds)}
-    result = evaluate(js, timeout=seconds + 60)
+    result = evaluate(js, timeout=seconds + 60, session=session)
     if isinstance(result, str):
         result = json.loads(result)
     if not isinstance(result, dict):
@@ -341,19 +435,19 @@ _BLOB_READ_JS = """
 """
 
 
-def arm_download() -> str:
+def arm_download(*, session: str = "") -> str:
     """Install a blob interceptor before the click that triggers a download.
 
     Client-side exports are produced as a Blob and clicked through an anchor;
     CDP download interception reports them as ``canceled`` every time. Reading
     the Blob directly is the only path the prior tool found that works.
     """
-    return str(evaluate(_BLOB_HOOK_JS))
+    return str(evaluate(_BLOB_HOOK_JS, session=session))
 
 
-def collect_download(destination: Path) -> dict[str, Any]:
+def collect_download(destination: Path, *, session: str = "") -> dict[str, Any]:
     """Write the most recent intercepted blob to disk."""
-    result = evaluate(_BLOB_READ_JS)
+    result = evaluate(_BLOB_READ_JS, session=session)
     if isinstance(result, str):
         result = json.loads(result)
     if not isinstance(result, list) or not result:
@@ -375,3 +469,45 @@ def _write_json(destination: Path, payload: dict[str, Any]) -> None:
     destination.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+
+
+def settle(milliseconds: int) -> None:
+    """Pause before a capture, for a page that animates into its final state."""
+    time.sleep(max(0, int(milliseconds)) / 1000.0)
+
+
+_WAIT_JS = """
+(() => {
+  try { return Boolean(%(expr)s); } catch (e) { return false; }
+})()
+"""
+
+
+def wait_for(expression: str, *, session: str = "", timeout_ms: int = 0) -> dict[str, Any]:
+    """Poll a JavaScript condition until it is truthy, then return.
+
+    A plan that says "wait 3-5 seconds before capturing" in its `do:` text is
+    stating a timing requirement nothing enforces — which is how a flaky step
+    gets recorded as a product defect. This makes the condition machine-checked:
+    the capture happens when the page is actually ready, or not at all.
+
+    Raises rather than capturing anyway. A capture taken before the condition
+    held is worse than no capture, because it looks like evidence.
+    """
+    deadline = time.monotonic() + (timeout_ms or 15000) / 1000.0
+    js = _WAIT_JS % {"expr": expression}
+    last = None
+    while True:
+        try:
+            last = evaluate(js, timeout=30, session=session)
+        except CaptureError as error:
+            last = f"error: {error}"
+        if last is True or str(last).lower() == "true":
+            return {"waited_for": expression, "ok": True}
+        if time.monotonic() >= deadline:
+            raise CaptureError(
+                f"wait_for({expression!r}) did not become true within "
+                f"{timeout_ms or 15000}ms (last value: {last!r}). The capture was "
+                "not taken; a capture before the condition holds is not evidence."
+            )
+        time.sleep(0.25)

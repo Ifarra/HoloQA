@@ -14,6 +14,12 @@ Guardrail 9 lives here: an assertion whose observation was never captured
 yields BLOCKED, never FAIL. Absence of evidence is not evidence of a defect.
 The prior tool put the same rule in prose — *"Ragu antara Lulus dan Blokir?
 Pilih Blokir"* — and it is the reason a filled checklist can hold a release.
+
+``blocked_if`` lives here too. A step that declares one turns a *violated*
+assertion into BLOCKED carrying the plan's own cause, because a step that
+cannot run in this environment must not be reported as a defect in the
+product. The downgrade reuses the BLOCKED-not-FAIL rule above, so a definite
+violation on a step with no ``blocked_if`` still outranks an unknown.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from holoqa import BLOCKED, FAIL, PASS
 from holoqa import plan as plan_module
@@ -115,6 +122,111 @@ def _latest(observations: list[dict[str, Any]], kind: str) -> dict[str, Any] | N
     return matching[-1] if matching else None
 
 
+def _run_observations(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every capture in the run, in step order.
+
+    A ``requires:`` precondition normally points at a fixture the agent captured
+    in an *earlier* step — a probe that the environment is up — so searching
+    only the current step's captures would report every precondition as unmet.
+    Order is preserved so "the latest capture of this kind" still means what it
+    says, and each record carries its step id so a scoped lookup can name it.
+    """
+    out: list[dict[str, Any]] = []
+    for step_id, step in data["steps"].items():
+        for item in step.get("observations", []):
+            out.append({**item, "step": step_id})
+    return out
+
+
+def _unmet_requirements(
+    plan: plan_module.Plan,
+    run: Run,
+    step: plan_module.Step,
+    observations: list[dict[str, Any]],
+    variables: dict[str, Any],
+) -> list[Result]:
+    """Check a step's ``requires:`` preconditions against captured evidence.
+
+    A precondition is an assertion evaluated against *captures that already
+    exist* — typically a fixture the agent captured earlier in the run, or a
+    value bound by an earlier step. It never triggers a capture of its own: a
+    check that could go fetch its own evidence would be a test, not a
+    precondition, and the distinction is what keeps BLOCKED meaningful.
+
+    When a requirement cannot be evaluated at all (no capture to read), that is
+    itself an unmet requirement — the precondition is unverified, so the step
+    cannot run. The reason names the precondition in the plan's own words, so a
+    report can group 64 BLOCKED by root cause instead of quoting 64 sentences.
+    """
+    if not step.requirements:
+        return []
+
+    # Preconditions read the whole run, because a fixture is normally captured
+    # once, in its own step, and consumed by many.
+    data = run.read()
+    everything = _run_observations(data) or observations
+
+    unmet: list[Result] = []
+    for kind, raw, scope in step.requirements:
+        try:
+            value = plan_module.interpolate(raw, variables)
+        except plan_module.PlanError as error:
+            unmet.append(Result("requires", None, f"requires {kind}: {error}", raw))
+            continue
+        # Judged by the same evaluator as an assertion, so each kind means one
+        # thing across the plan. An unmet or unevaluable one becomes BLOCKED.
+        result = _check(kind, value, run, everything, {}, scope, step.id)
+        if result.ok is True:
+            continue
+        unmet.append(
+            Result(
+                "requires",
+                None,
+                f"requires {kind} not satisfied: {result.detail}",
+                raw,
+            )
+        )
+    return unmet
+
+
+def _scope(
+    observations: list[dict[str, Any]],
+    kind: str,
+    on: str,
+    step_id: str,
+) -> tuple[dict[str, Any] | None, Result | None]:
+    """Pick the capture an assertion applies to.
+
+    Without ``on`` this is the most recent capture of that kind — the historical
+    behaviour, kept so existing plans do not change meaning. With ``on`` it is
+    the capture whose file stem matches, which is the fix for a step that makes
+    two calls and needs the assertion pinned to one of them: reading "the last
+    api capture" is an arbitrary choice that can be satisfied by the wrong
+    response.
+
+    Returns ``(observation, error)``. An ``on`` naming a capture that does not
+    exist is an error rather than a fallback, because silently judging the wrong
+    response is the bug being closed.
+    """
+    candidates = [item for item in observations if item["kind"] == kind]
+    if not on:
+        return (candidates[-1] if candidates else None), None
+    wanted = on.lower()
+    matching = [
+        item for item in candidates
+        if wanted in str(item.get("file", "")).lower()
+        or wanted in str(item.get("target", "")).lower()
+    ]
+    if not matching:
+        available = ", ".join(item.get("file", "?") for item in candidates) or "none"
+        return None, Result(
+            kind, None,
+            f"step {step_id}: on: {on!r} matches no {kind} capture "
+            f"(captured: {available})",
+        )
+    return matching[-1], None
+
+
 def evaluate(
     plan: plan_module.Plan,
     run: Run,
@@ -126,6 +238,42 @@ def evaluate(
     observations = run.step(data, step_id)["observations"]
     variables = run.vars()
 
+    # `requires:` preconditions are checked first and are fatal when unmet: the
+    # step did not run, so its assertions cannot be judged. The point of putting
+    # them in the plan is that HoloQA decides this, not the agent's prose — the
+    # reviewer's run had 64 BLOCKED whose only justification was a sentence the
+    # agent wrote, which is exactly the "agent must not grade" line.
+    unmet = _unmet_requirements(plan, run, step, observations, variables)
+    if unmet:
+        return BLOCKED, [item.as_dict() for item in unmet], {}
+
+    # Multi-actor soundness: evidence captured in the wrong identity's session
+    # must not be judged. A step that tests ownership, captured while logged in
+    # as somebody else, proves nothing — and the failure mode is invisible,
+    # because the bytes look like perfectly good evidence. The reviewer hit
+    # exactly this: an anonymous step returned the admin session's DOM with an
+    # identical hash.
+    expected_actor = plan.actor_for(step_id)
+    foreign = [
+        item for item in observations
+        if item.get("actor") and item["actor"] != expected_actor
+    ]
+    if foreign:
+        actors = ", ".join(sorted({item["actor"] for item in foreign}))
+        return (
+            BLOCKED,
+            [
+                Result(
+                    "actor",
+                    None,
+                    f"evidence was captured as actor {actors}, but this step runs "
+                    f"as {expected_actor!r}; the capture must be taken in the "
+                    "step's own session",
+                ).as_dict()
+            ],
+            {},
+        )
+
     results: list[Result] = []
     captures: dict[str, Any] = {}
 
@@ -136,13 +284,32 @@ def evaluate(
             {},
         )
 
-    for kind, raw in step.assertions:
+    for kind, raw, on in step.assertions:
         try:
             value = plan_module.interpolate(raw, variables)
         except plan_module.PlanError as error:
             results.append(Result(kind, None, str(error), raw))
             continue
-        results.append(_check(kind, value, run, observations, captures))
+        results.append(_check(kind, value, run, observations, captures, on, step_id))
+
+    # A step that declared `blocked_if` reports BLOCKED when an assertion is
+    # violated, because the plan itself says the environment may not be able to
+    # reach this step. The assertion's violation is not discarded: it is kept
+    # verbatim in the detail, after the plan's cause.
+    if step.blocked_if and any(result.ok is False for result in results):
+        cause = step.blocked_if.strip()
+        downgraded = [
+            Result(
+                result.kind,
+                None,
+                f"blocked_if: {cause}; the assertion was violated: {result.detail}"
+                if result.ok is False
+                else result.detail,
+                result.expected,
+            ).as_dict()
+            for result in results
+        ]
+        return BLOCKED, downgraded, captures
 
     if any(result.ok is False for result in results):
         verdict = FAIL
@@ -160,6 +327,8 @@ def _check(
     run: Run,
     observations: list[dict[str, Any]],
     captures: dict[str, Any],
+    on: str = "",
+    step_id: str = "",
 ) -> Result:
     if kind == "screenshot":
         shots = [item for item in observations if item["kind"] == "screenshot"]
@@ -168,25 +337,40 @@ def _check(
         return Result(kind, True, f"{len(shots)} screenshot(s) captured", value)
 
     if kind in {"url_contains", "url_matches", "text_contains", "text_not_contains"}:
-        return _check_page(kind, value, run, observations)
+        return _check_page(kind, value, run, observations, on, step_id)
 
     if kind == "api":
-        return _check_api(value, run, observations)
+        return _check_api(value, run, observations, on, step_id)
 
     if kind == "json":
-        return _check_json(value, run, observations)
+        return _check_json(value, run, observations, on, step_id)
+
+    if kind == "header":
+        return _check_header(value, run, observations, on, step_id)
+
+    if kind == "file":
+        return _check_file(value, run, observations, on, step_id)
 
     if kind == "changed":
         return _check_changed(value, observations)
 
     if kind == "capture":
-        return _check_capture(value, run, observations, captures)
+        return _check_capture(value, run, observations, captures, on, step_id)
 
     return Result(kind, None, f"assertion kind {kind!r} has no evaluator", value)
 
 
-def _check_page(kind: str, value: Any, run: Run, observations: list[dict[str, Any]]) -> Result:
-    latest = _latest(observations, "dom")
+def _check_page(
+    kind: str,
+    value: Any,
+    run: Run,
+    observations: list[dict[str, Any]],
+    on: str = "",
+    step_id: str = "",
+) -> Result:
+    latest, error = _scope(observations, "dom", on, step_id)
+    if error:
+        return error
     if not latest:
         return Result(kind, None, "no page capture; capture a dom observation first", value)
     payload = _load(run, latest)
@@ -214,24 +398,90 @@ def _check_page(kind: str, value: Any, run: Run, observations: list[dict[str, An
             )
         return Result(kind, present, detail, value)
 
-    return Result(kind, not present, "absent as required" if not present else "unexpectedly present", value)
+    # text_not_contains is the mirror image, and it had the same hole: a
+    # truncated capture cannot prove a string is *absent* either, because the
+    # string may sit in the part that was cut. Declaring PASS there is exactly
+    # the "absence of evidence read as evidence of absence" failure the module
+    # docstring warns about.
+    if present:
+        return Result(kind, False, "unexpectedly present", value)
+    if payload.get("truncated"):
+        return Result(
+            kind, None,
+            "absent from the captured text, but the page text was truncated, "
+            "so its absence is unverified",
+            value,
+        )
+    return Result(kind, True, "absent as required", value)
 
 
-def _check_api(value: Any, run: Run, observations: list[dict[str, Any]]) -> Result:
+def _api_path_matches(pattern: str, url: str) -> bool:
+    """Match a plan's ``path`` against a captured request URL.
+
+    Matching is on *path segments*, not raw substrings. A pattern matches the
+    captured path when it is the same path, or a prefix that ends on a segment
+    boundary — so ``/api/orders`` matches ``/api/orders``, ``/api/orders?page=2``
+    and ``/api/orders/88``, but never ``/api/orders-archive``.
+
+    The bug this closes: a raw substring test let an unrelated endpoint satisfy
+    an assertion. Because the evaluator reads captures newest-first, a healthy
+    ``/api/orders-archive`` captured after a broken ``/api/orders`` would decide
+    the verdict — a PASS for an endpoint that was returning 500.
+
+    The query string is ignored, since a plan legitimately writes a path without
+    it. For anything stricter, ``path_exact`` and ``path_regex`` exist.
+    """
+    if not pattern:
+        return True
+    target = urlparse(url).path or url
+    # A pattern that is explicitly anchored is treated as a regex by the caller,
+    # but keep this honest if one reaches here.
+    if pattern.startswith("^") or pattern.endswith("$"):
+        return re.search(pattern, target) is not None
+    pattern = pattern.rstrip("/") or "/"
+    target = target.rstrip("/") or "/"
+    return target == pattern or target.startswith(pattern + "/")
+
+
+def _check_api(
+    value: Any,
+    run: Run,
+    observations: list[dict[str, Any]],
+    on: str = "",
+    step_id: str = "",
+) -> Result:
     if not isinstance(value, dict):
         return Result("api", None, "api assertion must be a mapping", value)
     want_method = str(value.get("method", "GET")).upper()
     want_path = str(value.get("path", ""))
     want_status = value.get("status")
+    exact = bool(value.get("path_exact", False))
+    regex = value.get("path_regex")
 
-    for observation in reversed([item for item in observations if item["kind"] == "api"]):
+    def path_matches(url: str) -> bool:
+        target = urlparse(url).path or url
+        if regex:
+            return re.search(str(regex), target) is not None
+        if exact:
+            return target.rstrip("/") == want_path.rstrip("/")
+        return _api_path_matches(want_path, url)
+
+    candidates = [item for item in observations if item["kind"] == "api"]
+    if on:
+        scoped, error = _scope(observations, "api", on, step_id)
+        if error:
+            return error
+        candidates = [scoped] if scoped else []
+
+    for observation in reversed(candidates):
         payload = _load(run, observation)
         if not isinstance(payload, dict):
             continue
         request = payload.get("request", {})
         if str(request.get("method", "")).upper() != want_method:
             continue
-        if want_path and want_path not in str(request.get("url", "")):
+        url = str(request.get("url", ""))
+        if (want_path or regex) and not path_matches(url):
             continue
         status = payload.get("status")
         if want_status is None:
@@ -247,8 +497,16 @@ def _check_api(value: Any, run: Run, observations: list[dict[str, Any]]) -> Resu
     )
 
 
-def _check_json(value: Any, run: Run, observations: list[dict[str, Any]]) -> Result:
-    latest = _latest(observations, "api")
+def _check_json(
+    value: Any,
+    run: Run,
+    observations: list[dict[str, Any]],
+    on: str = "",
+    step_id: str = "",
+) -> Result:
+    latest, error = _scope(observations, "api", on, step_id)
+    if error:
+        return error
     if not latest:
         return Result("json", None, "no api capture to match against", value)
     payload = _load(run, latest)
@@ -259,6 +517,127 @@ def _check_json(value: Any, run: Run, observations: list[dict[str, Any]]) -> Res
         return Result("json", None, "the captured response body was not JSON", value)
     ok, detail = subset_matches(value, body)
     return Result("json", ok, detail, value)
+
+
+def _check_header(
+    value: Any,
+    run: Run,
+    observations: list[dict[str, Any]],
+    on: str = "",
+    step_id: str = "",
+) -> Result:
+    """Match a response header on a captured api exchange.
+
+    Headers were already captured — ``observe.api`` writes them — but there was
+    no way to assert on one, so a plan could not check ``content-range`` for a
+    ranged download or a cache directive. Accepts either a plain string (the
+    header must contain it) or ``{name, contains|equals|matches}``.
+    """
+    latest, error = _scope(observations, "api", on, step_id)
+    if error:
+        return error
+    if not latest:
+        return Result("header", None, "no api capture to read headers from", value)
+    payload = _load(run, latest)
+    if not isinstance(payload, dict):
+        return Result("header", None, "api capture could not be read", value)
+
+    headers = {
+        str(key).lower(): str(item)
+        for key, item in (payload.get("headers") or {}).items()
+    }
+
+    if isinstance(value, str):
+        # `header: content-range` — merely present and non-empty.
+        name, contains, equals, matches = value.lower(), None, None, None
+    elif isinstance(value, dict):
+        name = str(value.get("name", "")).lower()
+        contains = value.get("contains")
+        equals = value.get("equals")
+        matches = value.get("matches")
+        if not name:
+            return Result("header", None, "header assertion needs a name", value)
+        if contains is None and equals is None and matches is None:
+            # A name alone asserts presence, which is a legitimate weak check.
+            pass
+    else:
+        return Result("header", None, "header assertion must be a name or a mapping", value)
+
+    if name not in headers:
+        return Result("header", False, f"response has no {name!r} header", value)
+    actual = headers[name]
+
+    if equals is not None:
+        ok = actual == str(equals)
+        return Result("header", ok, f"{name}: {actual!r}", value)
+    if matches is not None:
+        ok = re.search(str(matches), actual) is not None
+        return Result("header", ok, f"{name}: {actual!r}", value)
+    if contains is not None:
+        ok = str(contains).lower() in actual.lower()
+        return Result("header", ok, f"{name}: {actual!r}", value)
+    return Result("header", True, f"{name}: {actual!r} present", value)
+
+
+def _check_file(
+    value: Any,
+    run: Run,
+    observations: list[dict[str, Any]],
+    on: str = "",
+    step_id: str = "",
+) -> Result:
+    """Assert on the *contents* of a downloaded file.
+
+    Without this a download step could only prove a 200 happened — the reviewer
+    could not tell a real CSV export from an error page saved as one. Accepts
+    ``{name_matches, size_gt, size_lt, contains, magic}``; every key given must
+    hold.
+    """
+    if not isinstance(value, dict) or not value:
+        return Result("file", None, "file assertion must be a mapping", value)
+
+    latest, error = _scope(observations, "download", on, step_id)
+    if error:
+        return error
+    if not latest:
+        # A `download` capture is what observe writes for a saved blob. An
+        # `api` capture can also carry a body worth checking.
+        latest, error = _scope(observations, "api", on, step_id)
+        if error:
+            return error
+    if not latest:
+        return Result("file", None, "no download capture to inspect", value)
+
+    path = run.evidence_dir / latest["file"]
+    if not path.is_file():
+        return Result("file", None, "the captured file is no longer on disk", value)
+    payload = path.read_bytes()
+    size = len(payload)
+
+    if "size_gt" in value and not size > int(value["size_gt"]):
+        return Result("file", False, f"file is {size} bytes, not > {value['size_gt']}", value)
+    if "size_lt" in value and not size < int(value["size_lt"]):
+        return Result("file", False, f"file is {size} bytes, not < {value['size_lt']}", value)
+    if "name_matches" in value:
+        ok = re.search(str(value["name_matches"]), latest["file"]) is not None
+        if not ok:
+            return Result("file", False, f"file name {latest['file']!r} does not match", value)
+    if "magic" in value:
+        # A leading magic number proves the bytes are the format they claim to
+        # be, which a saved error page would fail.
+        want = str(value["magic"]).encode("latin-1")
+        if not payload.startswith(want):
+            return Result("file", False, "file does not start with the expected magic bytes", value)
+    if "contains" in value:
+        try:
+            text = payload.decode("utf-8", errors="replace")
+        except Exception:
+            return Result("file", False, "file is not readable as text", value)
+        ok = str(value["contains"]).lower() in text.lower()
+        if not ok:
+            return Result("file", False, f"file does not contain {value['contains']!r}", value)
+
+    return Result("file", True, f"{latest['file']} ({size} bytes) satisfied", value)
 
 
 def _check_changed(value: Any, observations: list[dict[str, Any]]) -> Result:
@@ -295,10 +674,14 @@ def _check_capture(
     run: Run,
     observations: list[dict[str, Any]],
     captures: dict[str, Any],
+    on: str = "",
+    step_id: str = "",
 ) -> Result:
     if not isinstance(value, dict) or not value:
         return Result("capture", None, "capture must map name -> $.json.path", value)
-    latest = _latest(observations, "api")
+    latest, error = _scope(observations, "api", on, step_id)
+    if error:
+        return error
     if not latest:
         return Result("capture", None, "no api capture to read values from", value)
     payload = _load(run, latest)

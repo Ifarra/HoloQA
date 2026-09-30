@@ -81,6 +81,7 @@ class Run:
                 "verdict": None,
                 "note": "",
                 "verdict_note": "",
+                "blocked_cause": "",
                 "observations": [],
                 "assertions": [],
                 "kb_refs": [],
@@ -149,11 +150,17 @@ class Run:
         path: Path,
         target: str = "",
         summary: dict[str, Any] | None = None,
+        actor: str = "",
     ) -> dict[str, Any]:
         """Register a captured file as evidence for a step.
 
         Guardrail 4: a reference to a missing file is refused. Guardrail 1
         depends on this — an empty file never counts as evidence.
+
+        ``actor`` records which browser session produced the bytes. With more
+        than one identity in a run, "which session was this captured in" is part
+        of what makes the evidence mean something: a step that checks ownership
+        is only a test if it ran as the right actor.
         """
         path = Path(path)
         if not path.is_file():
@@ -168,6 +175,7 @@ class Run:
             "kind": kind,
             "file": path.name,
             "target": target,
+            "actor": actor,
             "bytes": size,
             "sha256": sha256_file(path),
             "captured_at": now(),
@@ -253,6 +261,13 @@ class Run:
             step["note"] = cause
             step["verdict_note"] = ""
         step["decided_by"] = by
+        # A machine-readable cause, so a report can group N blocked steps by root
+        # cause instead of printing N agent sentences. "requires api not
+        # satisfied: ..." is the same string for every step that shares a
+        # precondition, which is what makes the grouping meaningful.
+        step["blocked_cause"] = (
+            _blocked_cause(assertions) if verdict == BLOCKED and assertions else ""
+        )
         if assertions is not None:
             step["assertions"] = assertions
         step["finished_at"] = now()
@@ -312,6 +327,19 @@ class Run:
             # never make an all-zero run look green.
             "decision": "HOLD" if pending else decision(counts),
         }
+
+
+def _blocked_cause(assertions: list[dict[str, Any]]) -> str:
+    """The shared reason a step blocked: a prerequisite that the plan declared.
+
+    Only a ``requires`` failure produces a cause here. An agent-asserted BLOCKED
+    has free-text prose, which cannot be grouped — and grouping is the point:
+    "64 blocked" is not a finding, "41 blocked on the same missing fixture" is.
+    """
+    for item in assertions:
+        if item.get("kind") == "requires":
+            return str(item.get("detail", ""))
+    return ""
 
 
 def decision(counts: dict[str, int]) -> str:
