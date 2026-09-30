@@ -39,13 +39,26 @@ def plan(tmp_path) -> plan_module.Plan:
     return plan_module.load(path)
 
 
+@pytest.fixture()
+def any_provider(monkeypatch) -> None:
+    """Pretend every coding-agent binary is installed.
+
+    These tests assert on the *command line* HoloQA builds, which has nothing to
+    do with whether `claude` or `codex` happens to be on the machine running the
+    suite. CI has neither, so without this the whole file failed there while
+    passing on a developer box that had them — the tests were measuring the
+    environment, not the code. The same stub is used further down this file.
+    """
+    monkeypatch.setattr(agent_module, "provider_binary", lambda provider: provider)
+
+
 def _request(provider="claude", mode="unattended"):
     return agent_module.AgentRunRequest(provider=provider, cwd=Path("."), mode=mode)
 
 
 # ------------------------------------------------------- unattended semantics
 
-def test_claude_unattended_allows_the_tools_the_workflow_needs(tmp_path, plan):
+def test_claude_unattended_allows_the_tools_the_workflow_needs(tmp_path, plan, any_provider):
     """`--permission-prompts none` alone means *deny*, which is not unattended."""
     run = Run.create(tmp_path / "run", plan)
     spec = agent_module.build_launch(
@@ -57,7 +70,7 @@ def test_claude_unattended_allows_the_tools_the_workflow_needs(tmp_path, plan):
     assert "Bash(agent-browser:*)" in joined
 
 
-def test_claude_supervised_does_not_grant_blanket_tools(tmp_path, plan):
+def test_claude_supervised_does_not_grant_blanket_tools(tmp_path, plan, any_provider):
     run = Run.create(tmp_path / "run", plan)
     spec = agent_module.build_launch(
         _request("claude", "supervised"), run, "prompt", tmp_path
@@ -75,7 +88,7 @@ def test_every_provider_states_what_unattended_means():
     assert len(meanings) == len(agent_module.PROVIDERS)
 
 
-def test_codex_unattended_still_avoids_the_bypass_flag(tmp_path, plan):
+def test_codex_unattended_still_avoids_the_bypass_flag(tmp_path, plan, any_provider):
     run = Run.create(tmp_path / "run", plan)
     spec = agent_module.build_launch(
         _request("codex", "unattended"), run, "prompt", tmp_path
