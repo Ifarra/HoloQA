@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from holoqa import BLOCKED, FAIL, PASS
+from holoqa import run as run_module
 from holoqa.run import Run, decision
 
 _STATUS_MARK = {PASS: "PASS", FAIL: "FAIL", BLOCKED: "BLOCKED", None: "—"}
@@ -48,11 +49,24 @@ def validate(run: Run, *, strict: bool = True) -> dict[str, Any]:
     if strict and unjudged:
         problems.append(f"not yet judged: {', '.join(unjudged)}")
 
+    # The hashes were recorded and never checked, so a file edited after capture
+    # was packaged as if it were the capture. Now it is a problem, not a
+    # decoration — and it is the one check that works even on a run this process
+    # did not create, because it compares the records to the bytes.
+    tampered = run.verify_evidence()
+    if tampered:
+        problems.append(
+            f"evidence does not match its recorded hash: {'; '.join(tampered)}"
+        )
+
+    integrity = run.integrity()
     return {
         "ok": not problems,
         "problems": problems,
         "unjudged": unjudged,
         "counts": _counts(data),
+        "integrity": integrity["status"],
+        "integrity_reason": integrity.get("reason", ""),
     }
 
 
@@ -62,13 +76,20 @@ def _cause(step: dict[str, Any]) -> str:
 
 
 def _plan_for(run: Run, data: dict[str, Any]) -> Any:
-    """Load the plan a run was started from, or ``None`` if it moved."""
+    """The plan a run was started from, or ``None`` if it cannot be read.
+
+    Prefers the pinned copy, so the report describes the contract the run was
+    judged against even if the author's file has since moved or changed.
+    """
     from holoqa import plan as plan_module
 
-    try:
-        return plan_module.load(data["plan_path"])
-    except Exception:
-        return None
+    for candidate in (run.plan_pin, Path(data.get("plan_path", ""))):
+        try:
+            if candidate and Path(candidate).is_file():
+                return plan_module.load(candidate)
+        except Exception:
+            continue
+    return None
 
 
 def _known_defect_steps(plan: Any, data: dict[str, Any]) -> dict[str, str]:
@@ -118,13 +139,15 @@ def _counts(data: dict[str, Any]) -> dict[str, int]:
     return counts
 
 
-def markdown(run: Run) -> Path:
+def markdown(run: Run, integrity: dict[str, Any] | None = None) -> Path:
     data = run.read()
     counts = _counts(data)
     meta = data.get("meta", {})
     plan = _plan_for(run, data)
     known = _known_defect_steps(plan, data)
     weak = _weak_steps(plan, data)
+    integrity = integrity or run.integrity()
+    status = integrity.get("status", "unverified")
     lines = [
         f"# Release checklist — {data.get('app', 'application')}",
         "",
@@ -134,11 +157,25 @@ def markdown(run: Run) -> Path:
     for label in ("tag", "commit", "tester", "base_url", "started_at"):
         if meta.get(label):
             lines.append(f"- {label.replace('_', ' ').title()}: `{meta[label]}`")
+    # The first thing a reviewer needs to know is whether the records can be
+    # trusted, because every line below is only as good as that answer.
+    lines.append(f"- Evidence integrity: **{status}** — {integrity.get('reason', '')}")
     lines += [
         "",
         f"**{counts[PASS]} passed · {counts[FAIL]} failed · {counts[BLOCKED]} blocked — "
-        f"decision: {decision(counts)}**",
+        f"decision: {decision(counts) if status != 'unverified' else 'HOLD (unverified)'}**",
     ]
+    if status == "unverified":
+        lines.append(
+            "> This run's evidence could not be verified by the process reporting it, "
+            "so it cannot decide a release. A human must read it, then record the "
+            "decision with `holoqa attest`."
+        )
+    elif status == "tampered":
+        lines.append(
+            "> The run's records contradict its bytes. Do not act on this report "
+            "without establishing what changed."
+        )
     if weak:
         passing_weak = [
             step_id for step_id, _ in weak
@@ -243,19 +280,45 @@ def package(
     strict: bool = True,
     workbook_source: str | Path | None = None,
 ) -> dict[str, Any]:
-    """validate → report → optional xlsx → zip."""
+    """validate → report → optional xlsx → zip.
+
+    A run whose integrity is ``unverified`` still packages, but it does not get
+    to *decide* anything: the archive is produced for a human to review and the
+    decision is HOLD. Refusing outright would strand real runs whose server has
+    restarted; deciding RELEASE would be a green result nobody can stand behind.
+    The archive carries the integrity verdict and the reason.
+    """
     checked = validate(run, strict=strict)
     if not checked["ok"]:
         raise PackageError(
             "run is not fit to package: " + "; ".join(checked["problems"])
         )
 
+    integrity = checked["integrity"]
     data = run.read()
-    artifacts = [markdown(run)]
+    artifacts = [markdown(run, integrity=checked)]
 
     run_copy = run.out_dir / "run.json"
     run_copy.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     artifacts.append(run_copy)
+
+    integrity_copy = run.out_dir / "integrity.json"
+    integrity_copy.write_text(
+        json.dumps(
+            {
+                "status": integrity,
+                "reason": checked.get("integrity_reason", ""),
+                "evidence_files": sorted(
+                    item.name for item in run.evidence_dir.glob("*") if item.is_file()
+                ),
+                "at": run_module.now(),
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    artifacts.append(integrity_copy)
 
     if workbook_source:
         from holoqa.workbook import annotate
@@ -274,12 +337,19 @@ def package(
                 bundle.write(evidence, f"evidence/{evidence.name}")
 
     counts = checked["counts"]
+    # An unverifiable run packages for review, but it does not decide: a RELEASE
+    # nobody can stand behind is the exact output this tool exists to prevent.
+    decision_out = decision(counts)
+    if integrity == "unverified":
+        decision_out = "HOLD"
     return {
         "status": "packaged",
         "archive": str(archive),
         "bytes": archive.stat().st_size,
         "counts": counts,
-        "decision": decision(counts),
+        "decision": decision_out,
+        "integrity": integrity,
+        "integrity_reason": checked.get("integrity_reason", ""),
         "unjudged": checked["unjudged"],
         "artifacts": [item.name for item in artifacts],
     }

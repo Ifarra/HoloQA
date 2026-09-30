@@ -32,7 +32,8 @@ from urllib.parse import urlparse
 
 from holoqa import BLOCKED, FAIL, PASS
 from holoqa import plan as plan_module
-from holoqa.run import Run
+from holoqa import run as run_module
+from holoqa.run import IntegrityError, Run
 
 _JSONPATH = re.compile(r"\$\.?|\[(\d+)\]|\.?([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -119,9 +120,24 @@ def subset_matches(expected: Any, actual: Any) -> tuple[bool, str]:
 
 
 def _load(run: Run, observation: dict[str, Any]) -> Any:
+    """Read a capture, refusing to read bytes that are not the ones recorded.
+
+    The hash was always computed and never checked, so a file edited after the
+    capture was judged on its new contents. This is where that check lives, and
+    it applies to every assertion kind because they all read through here.
+    """
     path = run.evidence_dir / observation["file"]
     if not path.is_file():
         return None
+    recorded = observation.get("sha256")
+    if recorded:
+        actual = run_module.sha256_file(path)
+        if actual != recorded:
+            raise IntegrityError(
+                f"{observation['file']} does not match the hash recorded when it "
+                f"was captured (recorded {str(recorded)[:12]}, found {actual[:12]}); "
+                "the evidence was modified after capture, so it proves nothing"
+            )
     if path.suffix.lower() == ".json":
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -135,18 +151,22 @@ def _latest(observations: list[dict[str, Any]], kind: str) -> dict[str, Any] | N
     return matching[-1] if matching else None
 
 
-def _run_observations(data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every capture in the run, in step order.
+def _run_observations(run: Run) -> list[dict[str, Any]]:
+    """Every capture in the run that this process made, in step order.
 
     A ``requires:`` precondition normally points at a fixture the agent captured
     in an *earlier* step — a probe that the environment is up — so searching
     only the current step's captures would report every precondition as unmet.
     Order is preserved so "the latest capture of this kind" still means what it
     says, and each record carries its step id so a scoped lookup can name it.
+
+    Filtered the same way the step's own captures are: a record that never
+    passed through :meth:`Run.attach` is not evidence, so it cannot satisfy a
+    precondition either.
     """
     out: list[dict[str, Any]] = []
-    for step_id, step in data["steps"].items():
-        for item in step.get("observations", []):
+    for step_id in run.read()["steps"]:
+        for item in run.observations_seen_by_this_process(step_id):
             out.append({**item, "step": step_id})
     return out
 
@@ -176,8 +196,7 @@ def _unmet_requirements(
 
     # Preconditions read the whole run, because a fixture is normally captured
     # once, in its own step, and consumed by many.
-    data = run.read()
-    everything = _run_observations(data) or observations
+    everything = _run_observations(run) or observations
 
     unmet: list[Result] = []
     for kind, raw, scope in step.requirements:
@@ -276,10 +295,16 @@ def evaluate(
     run: Run,
     step_id: str,
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
-    """Judge one step. Returns ``(verdict, assertion results, captured vars)``."""
+    """Judge one step. Returns ``(verdict, assertion results, captured vars)``.
+
+    Only captures this process made are considered. When HoloQA owns the run,
+    the index it reads is its own memory, so a record written straight into
+    ``run.json`` is invisible here rather than authoritative — the step simply
+    has no evidence and blocks.
+    """
     step = plan.step(step_id)
     data = run.read()
-    observations = run.step(data, step_id)["observations"]
+    observations = run.observations_seen_by_this_process(step_id)
     variables = run.vars()
 
     # `requires:` preconditions are checked first and are fatal when unmet: the

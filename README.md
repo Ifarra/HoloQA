@@ -513,7 +513,8 @@ variables threading through five stages.
 
 ## MCP tools
 
-Ten. None accepts a verdict parameter — that absence is enforced by a test.
+Eleven. None accepts a verdict parameter, and none accepts a path to an
+evidence file — both absences are enforced by tests.
 
 | Tool | Required | Purpose |
 |---|---|---|
@@ -527,6 +528,7 @@ Ten. None accepts a verdict parameter — that absence is enforced by a test.
 | `holoqa_kb_add` | `kb_id`, `title` | propose a known behaviour found mid-run |
 | `holoqa_run_package` | — | validate → report → optional XLSX → ZIP |
 | `holoqa_run_compare` | — | diff against the last green run |
+| `holoqa_verify` | — | is this run's evidence trustworthy? `verified` / `unverified` / `tampered` |
 
 ### `holoqa_observe(step_id, kind, ...)`
 
@@ -555,12 +557,14 @@ HoloQA never edits a plan — plans are human-owned and reviewed.
 ## CLI
 
 ```
-holoqa [mcp|selftest|doctor|init|validate|status|agent]
+holoqa [mcp|selftest|doctor|init|validate|status|verify|attest|agent]
 ```
 
 | Command | What |
 |---|---|
 | *(none)* / `mcp` | serve the MCP server over stdio |
+| `verify` | report whether a run's evidence can be trusted (exit 0 / 1 / 2) |
+| `attest` | record that a human reviewed a run HoloQA cannot verify |
 | `doctor` | check `agent-browser`, print the MCP client entry |
 | `init` | scaffold `holoqa.plan.yaml` (`--app`, `--url`, `-o`) |
 | `validate <plan>` | lint a plan, print warnings |
@@ -678,6 +682,28 @@ which used to validate, package, and decide `RELEASE`.
 
 Plus the one that is not negotiable: **an agent can only assert `BLOCKED`.**
 
+### Who owns the evidence
+
+`run.json` is a *projection* of a ledger HoloQA holds in its own memory, not the
+source of truth. That distinction is the whole reason a hand-written record
+cannot pass:
+
+- **The plan is pinned.** `holoqa_run_start` copies the plan into the run
+  directory and judges against that copy. Editing the plan mid-run — the
+  cheapest way to turn a FAIL into a PASS — is detected and refused.
+- **Hashes are verified, not just recorded.** Every capture is re-hashed before
+  it is read and before it is packaged. A file edited after capture is `BLOCKED`
+  at judge time and refuses to package, instead of being judged on new bytes.
+- **Only captures this process made are evidence.** A record appended to
+  `run.json` by hand has no entry in the ledger, so the step blocks rather than
+  reading it.
+
+A run read by a process that did not create it is reported as `unverified`
+rather than trusted or rejected: nobody can tell a genuine `run.json` from a
+forged one, so HoloQA says so and refuses to decide a release from it. A human
+resolves that with `holoqa verify` and, having read the evidence, `holoqa
+attest --by <you> --reason <what you checked>`.
+
 Rule 6 matters more than it looks. Evidence ships in a ZIP, so a captured
 `POST /login` has its password stripped before the file is written — headers
 alone were not enough. Browsers also refuse to expose `Set-Cookie` to `fetch`,
@@ -694,12 +720,15 @@ Rule 5 exists because a release checklist is used to hold back a release, so
 .holoqa/
   runs/20260918-1430-shop/
     run.json        verdicts, notes, evidence index with SHA-256, revisions
+    plan.pinned.yaml  the plan as it was when this run started
+    attestation.json  present only if a human accepted an unverified run
     vars.json       captured bindings: {"order_id": "ord_88"}
     evidence/
       step-a1-screenshot.png
       step-a2-api-orders.json
     out/
       report.md
+      integrity.json            how far this run's evidence can be trusted
       checklist.xlsx            if meta.workbook is set
       20260918-1430-shop.zip    the deliverable
   history.jsonl     one line per completed run
@@ -814,6 +843,18 @@ useless.
   neither presence nor absence can be proven, and a guess in either direction
   would be the exact failure this tool exists to prevent.
 - **Single local run at a time.** No concurrency, no queue, no shared state.
+- **Integrity is enforced against a process, not against the operating
+  system.** HoloQA's guarantee is that *an agent cannot make HoloQA write a
+  PASS*, and the ledger plus the pinned plan plus the hash check deliver that.
+  It is not a defence against an actor with your user account and the intent to
+  forge a whole run: the same permissions that let an agent write a file let it
+  write a consistent one. What such an actor cannot do is make the forged run
+  look `verified` — a run nobody watched over is reported as `unverified`, and
+  an unverified run cannot decide a release.
+- **A run whose server restarted is `unverified` until a human attests it.**
+  The ledger lives in the process, so a fresh server cannot tell a real
+  `run.json` from a forged one. `holoqa verify` says which of the three states a
+  run is in; `holoqa attest` records a human's review.
 
 ---
 
@@ -821,7 +862,7 @@ useless.
 
 ```bash
 uv sync --dev
-uv run pytest -q              # 183 tests (3 real-browser tests are opt-in)
+uv run pytest -q              # 199 tests (3 real-browser tests are opt-in)
 uv run holoqa selftest        # 25 guardrail checks
 uv run holoqa validate examples/wolvesight.plan.yaml
 # Optional: run the three real-browser tests against an isolated session.

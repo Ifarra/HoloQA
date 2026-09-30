@@ -24,6 +24,7 @@ EXPECTED_TOOLS = {
     "holoqa_kb_add",
     "holoqa_run_package",
     "holoqa_run_compare",
+    "holoqa_verify",
 }
 
 #: Parameter names through which a caller could smuggle in an outcome.
@@ -52,6 +53,30 @@ def test_no_tool_accepts_a_verdict(tools):
     assert not offenders, (
         "a tool now accepts a verdict-shaped parameter: "
         + ", ".join(sorted(offenders))
+    )
+
+
+def test_no_tool_can_write_a_run_record():
+    """The tools may capture, judge, and report — never author evidence.
+
+    `holoqa_verify` was added with the integrity work; it reads. If a future
+    tool ever accepts a file path or an evidence record, this fails, because
+    that is the parameter through which the forgery becomes possible again.
+    """
+    import asyncio
+
+    from holoqa.mcp import server
+
+    tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    forbidden = {"file", "path_to_evidence", "evidence", "sha256", "record", "captured_at"}
+    offenders = {
+        f"{name}.{parameter}"
+        for name, tool in tools.items()
+        for parameter in (tool.input_schema or {}).get("properties", {})
+        if parameter.lower() in forbidden
+    }
+    assert not offenders, (
+        "a tool now accepts a caller-supplied evidence field: " + ", ".join(sorted(offenders))
     )
 
 

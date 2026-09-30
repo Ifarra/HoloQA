@@ -22,6 +22,7 @@ from holoqa import plan as plan_module
 from holoqa import run as run_module
 from holoqa import verdict as verdict_module
 from holoqa import agent as agent_module
+from holoqa import mcp as mcp_module
 from holoqa import report as report_module
 from holoqa.observe import REDACT_KEYS, redact
 from holoqa.run import GuardrailError, Run
@@ -364,6 +365,97 @@ steps:
             "ok   verdict      blocked_if on one assertion does not excuse another"
         )
 
+        # The three ways an agent used to be able to write its own PASS. Each is
+        # reproduced here so `holoqa selftest` fails if the mechanism is reverted.
+        integrity_plan_path = workspace / "integrity.yaml"
+        integrity_plan_path.write_text("""
+meta: { app: selftest }
+steps:
+  - id: I1
+    title: an api assertion that must be earned
+    expect:
+      - api: { method: GET, path: /thing, status: 200 }
+""", encoding="utf-8")
+        integrity_plan = plan_module.load(integrity_plan_path)
+        integrity_run = Run.create(workspace / "integrity-run", integrity_plan)
+
+        # F-4: the plan is pinned, so rewriting the author's file is refused.
+        original_plan = integrity_plan_path.read_text(encoding="utf-8")
+        integrity_plan_path.write_text(
+            "meta: { app: selftest }\nsteps:\n  - id: I1\n    title: t\n"
+            "    expect:\n      - screenshot: required\n",
+            encoding="utf-8",
+        )
+        try:
+            integrity_run.plan_for_judging()
+        except run_module.IntegrityError as error:
+            if "has changed since this run started" not in str(error):
+                raise SelftestFailure(f"F-4: refused for the wrong reason: {error}")
+        else:
+            raise SelftestFailure("F-4: a rewritten plan was accepted for judging")
+        integrity_plan_path.write_text(original_plan, encoding="utf-8")
+        lines.append("ok   integrity    a plan rewritten mid-run is refused")
+
+        # F-1: a record this process never made is not evidence.
+        forged = integrity_run.evidence_dir / "forged.json"
+        forged.write_text(
+            json.dumps({"request": {"method": "GET", "url": "http://localhost:0/thing"},
+                        "status": 200, "ok": True, "headers": {}, "elapsed_ms": 1,
+                        "body": None, "body_text": None}), encoding="utf-8"
+        )
+        forged_index = integrity_run.read()
+        forged_index["steps"]["I1"]["observations"].append({
+            "kind": "api", "file": forged.name, "target": "http://localhost:0/thing",
+            "actor": "default", "bytes": forged.stat().st_size, "sha256": "0" * 64,
+            "captured_at": "2026-01-01T00:00:00+00:00", "summary": {},
+        })
+        integrity_run._write(forged_index)
+        forged_outcome, forged_results, _ = verdict_module.evaluate(
+            integrity_plan, integrity_run, "I1"
+        )
+        if forged_outcome != BLOCKED or any(item["ok"] is not None for item in forged_results):
+            raise SelftestFailure(
+                "F-1: a hand-written index record produced a verdict "
+                f"({forged_outcome}: {forged_results})"
+            )
+        if integrity_run.integrity()["status"] != "tampered":
+            raise SelftestFailure("F-1: a hand-written record was not reported as tampered")
+        lines.append("ok   integrity    a hand-written evidence record is not evidence")
+
+        # F-3: bytes edited after capture no longer match the recorded hash.
+        honest = integrity_run.evidence_dir / "honest.json"
+        honest.write_text(
+            json.dumps({"request": {"method": "GET", "url": "http://localhost:0/thing"},
+                        "status": 503, "ok": False, "headers": {}, "elapsed_ms": 1,
+                        "body": None, "body_text": None}), encoding="utf-8"
+        )
+        integrity_run.attach("I1", kind="api", path=honest)
+        honest.write_text(
+            json.dumps({"request": {"method": "GET", "url": "http://localhost:0/thing"},
+                        "status": 200, "ok": True, "headers": {}, "elapsed_ms": 1,
+                        "body": None, "body_text": None}), encoding="utf-8"
+        )
+        if not integrity_run.verify_evidence():
+            raise SelftestFailure("F-3: an edited capture was not detected")
+        try:
+            verdict_module.evaluate(integrity_plan, integrity_run, "I1")
+        except run_module.IntegrityError:
+            pass
+        else:
+            raise SelftestFailure("F-3: an edited capture was judged instead of refused")
+        lines.append("ok   integrity    a capture edited after hashing is refused")
+
+        # A refusal must reach the caller as a reply, not as a dead connection.
+        wrapped = mcp_module._reporting_errors(
+            lambda: (_ for _ in ()).throw(
+                run_module.GuardrailError("deliberate refusal")
+            )
+        )
+        refusal = wrapped()
+        if refusal.get("status") != "refused" or "deliberate" not in refusal.get("detail", ""):
+            raise SelftestFailure(f"a refusal did not come back as a reply: {refusal}")
+        lines.append("ok   integrity    a refusal reaches the caller as a reply")
+
         print("\n".join(lines))
         print(f"\n{len(lines)} guardrails verified. No staging, no network, no browser.")
         return 0
@@ -632,6 +724,20 @@ def main(argv: list[str] | None = None) -> int:
     validate.add_argument("plan")
     status = sub.add_parser("status", help="show the active run")
     status.add_argument("--run-dir", default="")
+    verify = sub.add_parser(
+        "verify", help="report whether a run's evidence can be trusted"
+    )
+    verify.add_argument("--run-dir", default="")
+    attest = sub.add_parser(
+        "attest",
+        help="record that a human reviewed a run this process cannot verify",
+    )
+    attest.add_argument("--run-dir", default="")
+    attest.add_argument("--by", required=True, help="who reviewed it")
+    attest.add_argument(
+        "--reason", required=True,
+        help="what was checked; at least 10 characters, because it is the record",
+    )
     tui = sub.add_parser("tui", help="open the interactive agent dashboard")
     tui.add_argument(
         "--demo", nargs="?", const="static", choices=("static", "animated"),
@@ -720,11 +826,37 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         try:
             run = run_module.find(args.run_dir or None)
-            plan = plan_module.load(run.read()["plan_path"])
+            plan = run.pinned_plan()
         except (run_module.GuardrailError, plan_module.PlanError) as error:
             print(str(error), file=sys.stderr)
             return 2
         print(json.dumps(run.status(plan), indent=2))
+        return 0
+    if args.command == "verify":
+        try:
+            run = run_module.find(args.run_dir or None)
+            report = run.integrity()
+        except run_module.GuardrailError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+        report["run_id"] = run.read().get("run_id", run.dir.name)
+        report["run_dir"] = str(run.dir)
+        print(json.dumps(report, indent=2))
+        # Exit code is the answer, so this is usable as a gate in a script.
+        # 0 verified/attested, 1 tampered, 2 unverified.
+        return {"verified": 0, "attested": 0, "tampered": 1}.get(report["status"], 2)
+    if args.command == "attest":
+        try:
+            run = run_module.find(args.run_dir or None)
+            record = run.attest(by=args.by, reason=args.reason)
+        except run_module.GuardrailError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+        print(json.dumps({"status": "attested", **record}, indent=2))
+        print(
+            "This records that you reviewed the evidence yourself. HoloQA still "
+            "cannot verify it; the archive now says a human did."
+        )
         return 0
     if args.command == "tui":
         return tui_command(args)

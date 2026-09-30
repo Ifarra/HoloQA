@@ -25,7 +25,7 @@ from holoqa import plan as plan_module
 from holoqa import report as report_module
 from holoqa import run as run_module
 from holoqa import verdict as verdict_module
-from holoqa.run import GuardrailError, Run
+from holoqa.run import GuardrailError, IntegrityError, Run
 
 server = MCPServer(
     name="holoqa",
@@ -49,8 +49,15 @@ server = MCPServer(
 
 
 def _plan_for(run: Run) -> plan_module.Plan:
-    data = run.read()
-    return plan_module.load(data["plan_path"])
+    """The plan this run is judged against: the pinned copy, not the author's file.
+
+    Reading the author's file here is what let a FAIL become a PASS mid-run: the
+    plan is committed beside the code, so the agent under test could edit the
+    assertions and be judged against the edited version. The pinned copy is the
+    contract the run started with, and :meth:`Run.plan_for_judging` refuses when
+    the file on disk no longer matches it.
+    """
+    return run.plan_for_judging()
 
 
 def _resolve_url(run: Run, path: str) -> str:
@@ -318,7 +325,19 @@ def holoqa_judge(step_id: str, run_dir: str = "") -> dict[str, Any]:
             f"step {step_id} depends on {', '.join(unmet)}, which has not passed"
         )
 
-    outcome, results, captures = verdict_module.evaluate(plan, run, step_id)
+    integrity = run.integrity()
+    try:
+        outcome, results, captures = verdict_module.evaluate(plan, run, step_id)
+    except IntegrityError as error:
+        # Evidence that no longer matches its own record is not evidence. The
+        # step blocks with the reason rather than being judged on the bytes.
+        outcome, results, captures = BLOCKED, [
+            {"kind": "integrity", "ok": None, "detail": str(error), "expected": None}
+        ], {}
+    except plan_module.PlanError as error:
+        outcome, results, captures = BLOCKED, [
+            {"kind": "plan", "ok": None, "detail": str(error), "expected": None}
+        ], {}
 
     failures = [item["detail"] for item in results if item["ok"] is False]
     unknowns = [item["detail"] for item in results if item["ok"] is None]
@@ -332,6 +351,7 @@ def holoqa_judge(step_id: str, run_dir: str = "") -> dict[str, Any]:
         "assertions": results,
         "captured": captures,
         "note": note,
+        "integrity": integrity["status"],
         "next_step": status["next_step"],
         "counts": status["counts"],
     }
@@ -431,6 +451,68 @@ def holoqa_run_compare(against: str = "", run_dir: str = "") -> dict[str, Any]:
     return history_module.compare(run, against or None)
 
 
+def holoqa_verify(run_dir: str = "") -> dict[str, Any]:
+    """Report whether this run's evidence can be trusted, and why.
+
+    Three answers, and the middle one matters: ``verified`` means the process
+    answering also produced every capture it counts; ``tampered`` means the
+    records contradict the bytes; ``unverified`` means nobody can tell, because
+    this process did not make the run. A run that cannot be verified is not
+    silently promoted to a release decision — see ``holoqa_run_package``.
+    """
+    run = run_module.find(run_dir or None)
+    report = run.integrity()
+    report["run_id"] = run.read().get("run_id", run.dir.name)
+    report["run_dir"] = str(run.dir)
+    report["evidence_files"] = len(
+        [item for item in run.evidence_dir.glob("*") if item.is_file()]
+    )
+    return report
+
+
+def _reporting_errors(function: Any) -> Any:
+    """Turn a raised guardrail into a reply the agent can read.
+
+    A tool that raises used to produce *no response at all* on the stdio wire:
+    the client waits forever and the run dies with no explanation. Every refusal
+    in this codebase is deliberate — a tampered capture, a plan edited mid-run, a
+    missing pinned plan — so the refusal has to arrive as an answer. It is
+    returned as a normal result carrying ``status: "refused"``, which keeps the
+    caller in control of what to do next instead of hanging.
+    """
+    import functools
+    import inspect
+
+    @functools.wraps(function)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return function(*args, **kwargs)
+        except (GuardrailError, IntegrityError) as error:
+            return {
+                "status": "refused",
+                "error": type(error).__name__,
+                "detail": str(error),
+            }
+        except observe_module.CaptureError as error:
+            # agent-browser missing, a selector that matched nothing, a wait that
+            # never held. The capture did not happen, and the caller has to be
+            # told so — a silent hang is how a run dies with no explanation.
+            return {
+                "status": "capture_failed",
+                "error": "CaptureError",
+                "detail": str(error),
+            }
+        except plan_module.PlanError as error:
+            return {"status": "refused", "error": "PlanError", "detail": str(error)}
+        except report_module.PackageError as error:
+            return {"status": "refused", "error": "PackageError", "detail": str(error)}
+
+    # Keep the original signature: the MCP layer derives each tool's JSON schema
+    # from it, and a `*args, **kwargs` wrapper would erase every parameter.
+    wrapper.__signature__ = inspect.signature(function)
+    return wrapper
+
+
 for function, name in (
     (holoqa_plan_validate, "holoqa_plan_validate"),
     (holoqa_run_start, "holoqa_run_start"),
@@ -442,8 +524,9 @@ for function, name in (
     (holoqa_kb_add, "holoqa_kb_add"),
     (holoqa_run_package, "holoqa_run_package"),
     (holoqa_run_compare, "holoqa_run_compare"),
+    (holoqa_verify, "holoqa_verify"),
 ):
-    server.add_tool(function, name=name, structured_output=True)
+    server.add_tool(_reporting_errors(function), name=name, structured_output=True)
 
 
 def main() -> None:

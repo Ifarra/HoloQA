@@ -234,8 +234,46 @@ shell, and `runAgentBrowser` guards arguments containing `"` or `%`. Python's
 
 ## Changed during implementation
 
-Four decisions moved once the code met reality. Recorded here so the document
+Five decisions moved once the code met reality. Recorded here so the document
 does not describe a system that was never built.
+
+**The trust boundary moved off the API and into the process.** The section above
+says "the agent cannot write a passing verdict" and enforces it by omitting any
+verdict parameter from the tools. That is true and insufficient: the agent under
+test has a shell, `run.json` is a writable JSON file, and `holoqa_judge` read its
+index from disk. An audit reproduced a full PASS — `decided_by: holoqa`, shipped
+in the ZIP — from three file writes and a hand-edited index, without calling a
+single HoloQA tool.
+
+The fix is not another guardrail on the API. It is that the index now lives in
+HoloQA's memory, which an agent cannot reach, and `run.json` is written as a
+projection of it. Ownership is taken per capture, in `Run.attach`, by the process
+that actually produced the bytes — which is also why `Run.create` does *not*
+claim a run: the coding-agent wrapper creates runs and delegates every capture to
+the server it launches, and must not claim authority over records it did not make.
+
+The honest limit is recorded in the README's limitations and in the code: a
+process that did not create the run cannot tell a genuine `run.json` from a
+forged one, so it reports `unverified` and refuses to decide a release from it,
+rather than pretending to a certainty it does not have.
+
+**The plan is pinned, and the pin is checked.** `plan_sha256` was recorded at run
+start, printed in the report, and never compared to anything. Since the plan is
+committed beside the code, the agent could delete the assertion that was failing
+and be judged against the edited version — a FAIL became a PASS with no new
+evidence. `holoqa_run_start` now copies the plan into the run directory, judging
+reads that copy, and a source file that no longer matches it is refused.
+
+**The recorded hashes are verified.** Every capture has carried a SHA-256 since
+the first version; nothing read it back. It was decoration on a file that ships
+in a ZIP. It is checked now at judge time and again at package time, so editing a
+capture after the fact blocks the step instead of changing its verdict.
+
+**A refusal now arrives as a reply.** A tool that raised produced no response at
+all on the stdio wire: the client waited forever and the run died with no
+explanation. Every refusal here is deliberate, so `server.add_tool` is wrapped to
+return `{"status": "refused", ...}` — including `CaptureError`, which is what an
+agent hits when `agent-browser` is missing.
 
 **No `holoqa_act` tool.** The open question was whether HoloQA had to perform UI
 actions to work around Radix components ignoring plain clicks. Tested against

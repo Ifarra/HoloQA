@@ -354,7 +354,7 @@ def _stream_process(
 
 
 def _status(run: run_module.Run) -> dict[str, Any]:
-    plan = plan_module.load(run.read()["plan_path"])
+    plan = run.pinned_plan()
     return run.status(plan)
 
 
@@ -374,7 +374,7 @@ def launch(
     )
     if not request.cwd.is_dir():
         raise AgentError(f"working directory does not exist: {request.cwd}")
-    plan_path = Path(run.read()["plan_path"])
+    plan_path = run.plan_pin
     prompt = workflow_prompt(plan_path, run.dir, resume=resume)
     deadline = time.monotonic() + timeout_s if timeout_s else None
     with tempfile.TemporaryDirectory(prefix="holoqa-agent-") as temp:

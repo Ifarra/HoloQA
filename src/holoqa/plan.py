@@ -247,6 +247,10 @@ class Plan(BaseModel):
 
     source_path: str = ""
     source_sha256: str = ""
+    #: The exact bytes this plan was parsed from. Pinned into the run directory
+    #: so judging applies the contract that was reviewed, not whatever the file
+    #: happens to say later. Excluded from serialisation: it is not schema.
+    source_bytes: bytes = Field(default=b"", exclude=True, repr=False)
 
     def step(self, step_id: str) -> Step:
         for candidate in self.steps:
@@ -357,6 +361,7 @@ def load(path: str | Path) -> Plan:
             **data,
             source_path=str(plan_path),
             source_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+            source_bytes=raw_bytes,
         )
     except Exception as error:  # pydantic validation detail is the useful part
         raise PlanError(f"plan is invalid: {error}") from error
