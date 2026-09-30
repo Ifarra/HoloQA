@@ -109,18 +109,22 @@ async def test_theme_choice_persists_between_tui_instances(tmp_path, monkeypatch
 async def test_steps_sidebar_is_a_real_scroll_container() -> None:
     """The sidebar must be a scroll container that actually moves.
 
-    Uses the static demo on purpose. The animated one rewrites the step list on
-    a timer, so between `scroll_end` and the assertion the content can be
-    re-laid-out and the scroll position reset to 0 — the widget was fine, the
-    test was racing its own fixture. A fixed list makes the property under test
-    (this widget scrolls) deterministic.
+    Uses the static demo so the step list cannot be rewritten mid-assertion by
+    the animated demo's timer. The scroll is then polled to a bounded number of
+    frames rather than read after a single `pause()`: `scroll_end(animate=False)`
+    queues a refresh, and on a CI runner one frame is not always enough for
+    `scroll_y` to catch up with `max_scroll_y`, which made this test fail on a
+    widget that was working.
     """
     app = HoloQATui.demo()
     async with app.run_test(size=(100, 30)) as pilot:
         sidebar = app.query_one("#step-scroll", VerticalScroll)
         assert sidebar.max_scroll_y > 0, "the step list should overflow this size"
         sidebar.scroll_end(animate=False)
-        await pilot.pause()
+        for _ in range(10):
+            await pilot.pause()
+            if sidebar.scroll_y == sidebar.max_scroll_y:
+                break
         assert sidebar.scroll_y == sidebar.max_scroll_y
 
 
