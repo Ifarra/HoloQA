@@ -456,6 +456,25 @@ steps:
             raise SelftestFailure(f"a refusal did not come back as a reply: {refusal}")
         lines.append("ok   integrity    a refusal reaches the caller as a reply")
 
+        # The shortest forgery of all: leave the evidence alone and edit the
+        # answer. run.json is a projection, so the ledger must win.
+        # Read the file, edit it, write it back — what an agent with a shell
+        # does. Not `_write` (HoloQA's own writer, which keeps the ledger in
+        # step) and not `read()` (which hands back the ledger's live dict, so
+        # mutating it would edit the ledger rather than the file).
+        run_file = integrity_run.dir / run_module.RUN_FILE
+        verdict_index = json.loads(run_file.read_text(encoding="utf-8"))
+        verdict_index["steps"]["I1"]["verdict"] = PASS
+        verdict_index["steps"]["I1"]["verdict_note"] = ""
+        run_file.write_text(
+            json.dumps(verdict_index, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        if integrity_run.read()["steps"]["I1"]["verdict"] == PASS:
+            raise SelftestFailure(
+                "a verdict written into run.json overrode the ledger"
+            )
+        lines.append("ok   integrity    a hand-edited verdict in run.json is ignored")
+
         print("\n".join(lines))
         print(f"\n{len(lines)} guardrails verified. No staging, no network, no browser.")
         return 0

@@ -257,6 +257,14 @@ process that did not create the run cannot tell a genuine `run.json` from a
 forged one, so it reports `unverified` and refuses to decide a release from it,
 rather than pretending to a certainty it does not have.
 
+Getting there took one wrong turn worth recording. To let the wrapper *watch* a
+server it launched, `read()` merged the file whenever its mtime moved. That also
+re-imported a hand-edited `verdict`, so the shortest forgery of all — leave the
+evidence alone, write `verdict: PASS` — packaged as RELEASE with `integrity:
+verified`. Two writers are indistinguishable at the file level, so the file is
+no longer consulted once the ledger exists; the wrapper reads a run it did not
+capture as `unverified` instead.
+
 **The plan is pinned, and the pin is checked.** `plan_sha256` was recorded at run
 start, printed in the report, and never compared to anything. Since the plan is
 committed beside the code, the agent could delete the assertion that was failing

@@ -369,27 +369,21 @@ class Run:
         """The run's state: the ledger when this process owns it, else the file.
 
         Preferring memory is what closes the forgery: an agent can edit
-        ``run.json`` freely, and none of the judge's decisions will consult it.
+        ``run.json`` freely — records *and* verdicts — and once this process holds
+        a ledger, none of that reaches a decision.
 
-        The one exception is a file that *another HoloQA process* wrote — the
-        wrapper's server judging steps while this process watches. That is
-        detected by mtime and merged, keeping this process's knowledge of which
-        captures it made. A hand-edit is picked up the same way, and then
-        contradicts ``seen_files``, which is how it is caught.
+        There is deliberately no "pick up a newer file" path. An earlier version
+        merged the file whenever its mtime moved, so that a wrapper process could
+        watch a server process's captures. That also re-imported a hand-edited
+        ``verdict`` from disk, which is a forged PASS by the shortest route. The
+        two writers are indistinguishable at the file level, so the file is not
+        consulted once we are authoritative; a process that did not capture the
+        records reports the run ``unverified`` instead.
         """
-        key = str(self.dir)
-        held = _LEDGERS.get(key)
-        path = self.dir / RUN_FILE
+        held = _LEDGERS.get(str(self.dir))
         if held is not None:
-            if path.is_file():
-                stamp = path.stat().st_mtime
-                if stamp != held.mtime:
-                    try:
-                        held.data = json.loads(path.read_text(encoding="utf-8"))
-                        held.mtime = stamp
-                    except ValueError:
-                        pass
             return held.data
+        path = self.dir / RUN_FILE
         if not path.is_file():
             raise GuardrailError(f"no run.json in {self.dir}; start a run first")
         return json.loads(path.read_text(encoding="utf-8"))

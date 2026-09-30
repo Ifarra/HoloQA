@@ -697,6 +697,9 @@ cannot pass:
 - **Only captures this process made are evidence.** A record appended to
   `run.json` by hand has no entry in the ledger, so the step blocks rather than
   reading it.
+- **A verdict written into `run.json` is ignored.** The file is a projection, so
+  editing `verdict: FAIL` to `PASS` — the shortest forgery there is, and one that
+  leaves the evidence untouched — never reaches a decision.
 
 A run read by a process that did not create it is reported as `unverified`
 rather than trusted or rejected: nobody can tell a genuine `run.json` from a
@@ -862,7 +865,7 @@ useless.
 
 ```bash
 uv sync --dev
-uv run pytest -q              # 199 tests (3 real-browser tests are opt-in)
+uv run pytest -q              # 201 tests (3 real-browser tests are opt-in)
 uv run holoqa selftest        # 25 guardrail checks
 uv run holoqa validate examples/wolvesight.plan.yaml
 # Optional: run the three real-browser tests against an isolated session.

@@ -266,6 +266,37 @@ def test_a_real_capture_still_passes(run):
     assert run.integrity()["status"] == "verified"
 
 
+def test_editing_a_verdict_in_run_json_is_ignored(tmp_path, monkeypatch):
+    """The shortest forgery: no evidence games, just write the answer.
+
+    `run.json` is a projection, not the record. Once this process holds a ledger,
+    an edited verdict in the file never reaches a decision — otherwise a run whose
+    evidence says FAIL packages as RELEASE with `integrity: verified`.
+    """
+    plan = _plan(tmp_path)
+    run = Run.create(tmp_path / "run", plan)
+    monkeypatch.setenv("HOLOQA_RUN_DIR", str(run.dir))
+    try:
+        _api_evidence(run, "A1", "orders", status=500)
+        _screenshot(run, "A1")
+        assert mcp_module.holoqa_judge("A1")["verdict"] == FAIL
+
+        # The agent rewrites the verdict and the note, leaving the evidence alone.
+        data = json.loads((run.dir / "run.json").read_text(encoding="utf-8"))
+        data["steps"]["A1"]["verdict"] = PASS
+        data["steps"]["A1"]["verdict_note"] = ""
+        (run.dir / "run.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        assert run.read()["steps"]["A1"]["verdict"] == FAIL, (
+            "the file must not override the ledger"
+        )
+        packaged = mcp_module.holoqa_run_package(strict=False)
+        assert packaged["decision"] == "HOLD", "a hand-edited verdict must not release"
+        assert packaged["counts"][PASS] == 0
+    finally:
+        run_module.forget_ledger(run.dir)
+
+
 # ----------------------------------------------------------------- F-3 hashes
 
 def test_editing_a_capture_after_the_fact_is_detected(run):
