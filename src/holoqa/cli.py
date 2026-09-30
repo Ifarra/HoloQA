@@ -276,6 +276,94 @@ steps:
       - api: { method: GET, path: /a/{x}, status: 200 }
 """, "must be quoted"))
 
+        # A status-less api assertion used to pass on any response at all, so a
+        # 500 on a broken endpoint satisfied `{api: {method: GET, path: /x}}`.
+        lines.append(_plan_refusal(
+            workspace, "plan check   api assertion without a status rejected",
+            """
+meta: { app: selftest }
+steps:
+  - id: A
+    title: asserts nothing
+    expect:
+      - api: { method: GET, path: /a }
+""", "needs a `status`"))
+
+        # `size_gtt` / `contain` were accepted and ignored, so the assertion
+        # degraded silently instead of failing.
+        lines.append(_plan_refusal(
+            workspace, "plan check   unknown file/header key rejected",
+            """
+meta: { app: selftest }
+steps:
+  - id: A
+    title: typo keys
+    expect:
+      - file: { size_gtt: 1000 }
+""", "unknown key"))
+
+        # A bad regex used to load, then raise an uncaught re.error mid-judge.
+        lines.append(_plan_refusal(
+            workspace, "plan check   invalid regex rejected at load",
+            """
+meta: { app: selftest }
+steps:
+  - id: A
+    title: unclosed set
+    expect:
+      - url_matches: "([unclosed"
+""", "invalid regular expression"))
+
+        # Zero steps used to validate, package, and decide RELEASE.
+        lines.append(_plan_refusal(
+            workspace, "plan check   empty plan rejected",
+            """
+meta: { app: selftest }
+steps: []
+""", "at least one step"))
+
+        # One declared cause used to excuse every violated assertion on the step,
+        # so a session that expired was reported under a feature-flag cause.
+        cause_plan_path = workspace / "cause.yaml"
+        cause_plan_path.write_text("""
+meta: { app: selftest }
+steps:
+  - id: C1
+    title: one expected failure, one unrelated
+    expect:
+      - { api: { method: GET, path: /thing, status: 200 },
+          blocked_if: the service is disabled in this environment }
+      - text_contains: Checkout
+""", encoding="utf-8")
+        cause_plan = plan_module.load(cause_plan_path)
+        cause_run = Run.create(workspace / "cause-run", cause_plan)
+        cause_api = cause_run.evidence_dir / "c1.json"
+        cause_api.write_text(json.dumps({
+            "request": {"method": "GET", "url": "http://localhost:0/thing", "body": None},
+            "status": 503, "ok": False, "headers": {}, "elapsed_ms": 3,
+            "body": None, "body_text": None,
+        }), encoding="utf-8")
+        cause_run.attach("C1", kind="api", path=cause_api)
+        cause_page = cause_run.evidence_dir / "c1-page.json"
+        cause_page.write_text(json.dumps({
+            "url": "http://localhost:0/login", "title": "Sign in",
+            "text": "Session expired.", "text_length": 16, "truncated": False,
+        }), encoding="utf-8")
+        cause_run.attach("C1", kind="dom", path=cause_page)
+        cause_outcome, cause_results, _ = verdict_module.evaluate(
+            cause_plan, cause_run, "C1"
+        )
+        excused = next(r for r in cause_results if r["kind"] == "api")
+        unexcused = next(r for r in cause_results if r["kind"] == "text_contains")
+        if cause_outcome != FAIL or excused["ok"] is not None or unexcused["ok"] is not False:
+            raise SelftestFailure(
+                "blocked_if scoping: one assertion's declared cause excused "
+                f"another ({cause_outcome}: {cause_results})"
+            )
+        lines.append(
+            "ok   verdict      blocked_if on one assertion does not excuse another"
+        )
+
         print("\n".join(lines))
         print(f"\n{len(lines)} guardrails verified. No staging, no network, no browser.")
         return 0

@@ -241,6 +241,15 @@ def holoqa_observe(
 
     name = run_module.slugify(slug or path or selector or kind)
     stem = f"step-{run_module.slugify(step_id)}-{name}"
+    # A second capture of the same kind in the same step must not overwrite the
+    # first. It used to: two `holoqa_observe("A2", "api", path="/api/orders")`
+    # calls wrote one file, so the index held two records pointing at the same
+    # bytes and `changed` — the assertion that exists to compare two captures
+    # taken apart — could only ever see the survivor. Numbering the later
+    # captures keeps both on disk, which is what the run record already claims.
+    already = run.observations(step_id, kind)
+    if already:
+        stem = f"{stem}-{len(already) + 1}"
 
     if kind == "screenshot":
         destination = run.evidence_dir / f"{stem}.png"

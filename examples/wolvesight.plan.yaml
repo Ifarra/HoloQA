@@ -7,8 +7,9 @@
 # Catatan format:
 #   - nilai yang memuat {kurung} WAJIB dikutip di dalam flow mapping { }
 #   - status boleh berupa angka atau daftar, mis. status: [400, 403, 409]
-#   - langkah tanpa assertion yang bisa dicek mesin ditandai UJI LEMAH; verdict
-#     PASS di situ hanya berarti "ada bukti", jadi baca sendiri buktinya.
+#   - langkah tanpa assertion yang bisa dicek mesin ditandai `strength: weak`
+#     plus `weak_reason`; verdict PASS di situ hanya berarti "ada bukti", dan
+#     laporan menghitung berapa banyak PASS yang masih perlu dibaca manusia.
 
 meta:
   app: wolvesight
@@ -216,7 +217,9 @@ steps:
     do: Ambil dua dump berjarak yang memperlihatkan transisi state.
     expect:
       - api: { method: GET, path: "/api/phase2/scans/{scan_id}/findings/enrichment-progress", status: 200 }
-      - changed: api
+      # `scope` pins `changed` to the enrichment endpoint: without it, a second
+      # capture of any other api call counted as "the progress moved".
+      - { changed: api, scope: "/api/phase2/scans/{scan_id}/findings/enrichment-progress" }
       - screenshot: required
 
   - id: B14
@@ -227,7 +230,8 @@ steps:
     expect:
       - api: { method: POST, path: "/api/phase2/scans/{scan_id}/findings/bulk-approve", status: 200 }
       - screenshot: required
-    # UJI LEMAH: kesamaan set id harus dibaca manual dari dump; tulis di catatan.
+    strength: weak
+    weak_reason: kesamaan set id harus dibaca manual dari dump; tulis di catatan
 
   - id: B15
     stage: B
@@ -277,7 +281,8 @@ steps:
     expect:
       - api: { method: GET, path: "/api/phase2/scans/{scan_id}/report", status: 200 }
       - screenshot: required
-    # UJI LEMAH: kecocokan jumlah dibaca manual. Sebutkan kedua angka di catatan.
+    strength: weak
+    weak_reason: kecocokan jumlah dibaca manual; sebutkan kedua angka di catatan
 
   - id: C20
     stage: C
@@ -326,8 +331,8 @@ steps:
     do: Unduh Markdown, HTML, PDF, PPTX lewat capture download, lalu buka isinya.
     expect:
       - screenshot: required
-    # UJI LEMAH: keutuhan berkas (PDF punya halaman, bukan halaman kosong)
-    # diperiksa manual. Lampirkan tiap berkas sebagai bukti download.
+    strength: weak
+    weak_reason: keutuhan berkas (PDF punya halaman, bukan halaman kosong) diperiksa manual; lampirkan tiap berkas sebagai bukti download
 
   - id: D25
     stage: D
@@ -393,4 +398,5 @@ steps:
     expect:
       - api: { method: GET, path: "/api/findings/{finding_id}/activity", status: 200 }
       - screenshot: required
-    # UJI LEMAH: "aktornya bukan system/kosong" dibaca manual dari dump.
+    strength: weak
+    weak_reason: '"aktornya bukan system/kosong" dibaca manual dari dump'

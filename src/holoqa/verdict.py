@@ -40,19 +40,32 @@ _JSONPATH = re.compile(r"\$\.?|\[(\d+)\]|\.?([A-Za-z_][A-Za-z0-9_]*)")
 class Result:
     """One assertion's outcome."""
 
-    def __init__(self, kind: str, ok: bool | None, detail: str, expected: Any = None):
+    def __init__(
+        self,
+        kind: str,
+        ok: bool | None,
+        detail: str,
+        expected: Any = None,
+        blocked_if: str = "",
+    ):
         self.kind = kind
         self.ok = ok  # True / False / None (could not evaluate)
         self.detail = detail
         self.expected = expected
+        #: The cause this assertion's own violation may be downgraded to. Empty
+        #: means "a violation here is a defect", which is the default.
+        self.blocked_if = blocked_if
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "kind": self.kind,
             "ok": self.ok,
             "detail": self.detail,
             "expected": self.expected,
         }
+        if self.blocked_if:
+            out["blocked_if"] = self.blocked_if
+        return out
 
 
 def jsonpath(data: Any, expression: str) -> tuple[bool, Any]:
@@ -189,6 +202,24 @@ def _unmet_requirements(
     return unmet
 
 
+def _capture_names(item: dict[str, Any]) -> set[str]:
+    """The names a capture answers to, normalised.
+
+    A plan writes `scope: orders` or `scope: /api/orders`; the capture records a
+    file `orders.json` and a target `http://host/api/orders`. All three spellings
+    are accepted, and all three are *exact* — the path is derived with
+    :func:`urlparse` rather than substring-matched, so `/api/orders` still cannot
+    be satisfied by `/api/orders-archive`.
+    """
+    target = str(item.get("target", "")).strip().lower()
+    names = {
+        target.rstrip("/"),
+        (urlparse(target).path or "").rstrip("/"),
+        Path(str(item.get("file", ""))).stem.strip().lower(),
+    }
+    return {name.lstrip("/") for name in names if name}
+
+
 def _scope(
     observations: list[dict[str, Any]],
     kind: str,
@@ -199,10 +230,16 @@ def _scope(
 
     Without ``on`` this is the most recent capture of that kind — the historical
     behaviour, kept so existing plans do not change meaning. With ``on`` it is
-    the capture whose file stem matches, which is the fix for a step that makes
-    two calls and needs the assertion pinned to one of them: reading "the last
-    api capture" is an arbitrary choice that can be satisfied by the wrong
-    response.
+    the capture the name identifies, which is the fix for a step that makes two
+    calls and needs the assertion pinned to one of them.
+
+    Naming is an *exact* match, not a substring. Substring matching let a decoy
+    whose name merely contained the wanted one satisfy the assertion — the same
+    shape as the ``/api/orders`` versus ``/api/orders-archive`` path bug, and it
+    has the same consequence: the wrong response decides the verdict. And when
+    more than one capture answers to the name, the evaluator does not guess.
+    Reading the newest of them is an arbitrary choice, and arbitrary choices are
+    what this module exists to remove, so an ambiguous scope is BLOCKED.
 
     Returns ``(observation, error)``. An ``on`` naming a capture that does not
     exist is an error rather than a fallback, because silently judging the wrong
@@ -211,20 +248,27 @@ def _scope(
     candidates = [item for item in observations if item["kind"] == kind]
     if not on:
         return (candidates[-1] if candidates else None), None
-    wanted = on.lower()
-    matching = [
-        item for item in candidates
-        if wanted in str(item.get("file", "")).lower()
-        or wanted in str(item.get("target", "")).lower()
-    ]
+    wanted = on.strip().lower().lstrip("/")
+
+    matching = [item for item in candidates if wanted in _capture_names(item)]
     if not matching:
-        available = ", ".join(item.get("file", "?") for item in candidates) or "none"
+        available = ", ".join(
+            str(item.get("file", "?")) for item in candidates
+        ) or "none"
         return None, Result(
             kind, None,
-            f"step {step_id}: on: {on!r} matches no {kind} capture "
+            f"step {step_id}: scope {on!r} matches no {kind} capture "
             f"(captured: {available})",
         )
-    return matching[-1], None
+    if len(matching) > 1:
+        files = ", ".join(str(item.get("file", "?")) for item in matching)
+        return None, Result(
+            kind, None,
+            f"step {step_id}: scope {on!r} matches {len(matching)} {kind} "
+            f"captures ({files}); the assertion does not say which one it means. "
+            "Rename the capture so the scope is unambiguous.",
+        )
+    return matching[0], None
 
 
 def evaluate(
@@ -284,32 +328,43 @@ def evaluate(
             {},
         )
 
-    for kind, raw, on in step.assertions:
+    for kind, raw, on, blocked_if in step.assertions_with_causes:
         try:
             value = plan_module.interpolate(raw, variables)
+            # `scope` is interpolated for the same reason `path` is: a plan that
+            # writes `scope: "/api/orders/{order_id}"` means the resolved URL,
+            # and an un-interpolated scope would silently match no capture.
+            scope = plan_module.interpolate(on, variables) if on else ""
         except plan_module.PlanError as error:
-            results.append(Result(kind, None, str(error), raw))
+            results.append(Result(kind, None, str(error), raw, blocked_if))
             continue
-        results.append(_check(kind, value, run, observations, captures, on, step_id))
+        results.append(
+            _check(kind, value, run, observations, captures, scope, step_id, blocked_if)
+        )
 
-    # A step that declared `blocked_if` reports BLOCKED when an assertion is
-    # violated, because the plan itself says the environment may not be able to
-    # reach this step. The assertion's violation is not discarded: it is kept
-    # verbatim in the detail, after the plan's cause.
-    if step.blocked_if and any(result.ok is False for result in results):
-        cause = step.blocked_if.strip()
-        downgraded = [
-            Result(
-                result.kind,
-                None,
-                f"blocked_if: {cause}; the assertion was violated: {result.detail}"
-                if result.ok is False
-                else result.detail,
-                result.expected,
-            ).as_dict()
-            for result in results
-        ]
-        return BLOCKED, downgraded, captures
+    # A step may declare `blocked_if`, per assertion or once for the whole step.
+    # The per-assertion cause wins, so a step whose checkout assertion is allowed
+    # to be disabled in this environment does not also excuse an unrelated
+    # failure — a session that expired mid-step is a defect, not the feature flag
+    # the plan named. A *violated* assertion carrying a cause is downgraded to
+    # "could not be verified", which the rule below turns into BLOCKED; the
+    # violation is kept verbatim in the detail, after the plan's own cause.
+    downgraded: list[Result] = []
+    for result in results:
+        cause = result.blocked_if
+        if result.ok is False and cause:
+            downgraded.append(
+                Result(
+                    result.kind,
+                    None,
+                    f"blocked_if: {cause}; the assertion was violated: {result.detail}",
+                    result.expected,
+                    cause,
+                )
+            )
+        else:
+            downgraded.append(result)
+    results = downgraded
 
     if any(result.ok is False for result in results):
         verdict = FAIL
@@ -322,6 +377,27 @@ def evaluate(
 
 
 def _check(
+    kind: str,
+    value: Any,
+    run: Run,
+    observations: list[dict[str, Any]],
+    captures: dict[str, Any],
+    on: str = "",
+    step_id: str = "",
+    blocked_if: str = "",
+) -> Result:
+    """Evaluate one assertion, tagging it with the cause its violation carries.
+
+    ``blocked_if`` travels with the assertion rather than the step so that the
+    downgrade stays scoped to the failure the plan actually anticipated.
+    """
+    result = _dispatch(kind, value, run, observations, captures, on, step_id)
+    if blocked_if and not result.blocked_if:
+        result.blocked_if = blocked_if
+    return result
+
+
+def _dispatch(
     kind: str,
     value: Any,
     run: Run,
@@ -352,7 +428,7 @@ def _check(
         return _check_file(value, run, observations, on, step_id)
 
     if kind == "changed":
-        return _check_changed(value, observations)
+        return _check_changed(value, observations, on, step_id)
 
     if kind == "capture":
         return _check_capture(value, run, observations, captures, on, step_id)
@@ -640,19 +716,64 @@ def _check_file(
     return Result("file", True, f"{latest['file']} ({size} bytes) satisfied", value)
 
 
-def _check_changed(value: Any, observations: list[dict[str, Any]]) -> Result:
+def _scope_many(
+    observations: list[dict[str, Any]],
+    kind: str,
+    on: str,
+    step_id: str,
+) -> tuple[list[dict[str, Any]], Result | None]:
+    """Every capture of ``kind`` whose ``target`` is the one ``on`` names.
+
+    ``changed`` needs *two* captures of the same subject, so a single-capture
+    scope would be useless: a file stem identifies one file, while the target
+    identifies the subject. ``scope: /api/orders`` therefore means "the two
+    captures of ``/api/orders``", which is what a plan that tests a change
+    actually means. Matching is exact for the same reason it is exact in
+    :func:`_scope` — a substring let a lookalike decide the verdict.
+    """
+    candidates = [item for item in observations if item["kind"] == kind]
+    if not on:
+        return candidates, None
+    wanted = on.strip().lower().lstrip("/")
+
+    matching = [item for item in candidates if wanted in _capture_names(item)]
+    if not matching:
+        available = ", ".join(
+            str(item.get("target") or item.get("file", "?")) for item in candidates
+        ) or "none"
+        return [], Result(
+            kind, None,
+            f"step {step_id}: scope {on!r} matches no {kind} capture "
+            f"(captured: {available})",
+        )
+    return matching, None
+
+
+def _check_changed(
+    value: Any,
+    observations: list[dict[str, Any]],
+    on: str = "",
+    step_id: str = "",
+) -> Result:
     """Two captures of the same target, taken apart, must differ.
 
     The prior tool stated the rule and relied on discipline: *"Langkah yang
     menguji perubahan butuh dua bukti berjarak... Satu tangkapan tidak
     membuktikan apa pun."* Here it is checked.
+
+    ``scope`` used to be accepted on this assertion and silently dropped, so a
+    plan that pinned it got the unpinned behaviour — comparing captures of two
+    different endpoints and calling that a change. It is honoured now.
     """
     kind = str(value) if isinstance(value, str) else str(value.get("kind", "dom"))
-    matching = [item for item in observations if item["kind"] == kind]
+    matching, error = _scope_many(observations, kind, on, step_id)
+    if error:
+        return error
     if len(matching) < 2:
+        where = f" for scope {on!r}" if on else ""
         return Result(
             "changed", None,
-            f"needs two {kind} captures taken apart, found {len(matching)}",
+            f"needs two {kind} captures taken apart, found {len(matching)}{where}",
             value,
         )
     first, last = matching[0], matching[-1]

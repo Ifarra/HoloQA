@@ -319,8 +319,11 @@ seconds wide. Mitigation: `BLOCKED` is always available, and M5 surfaces this
 early. Do not respond by widening the assertion set into a scripting language.
 
 **Capture-through-HoloQA is slower to iterate** than the agent calling
-`agent-browser` directly. Mitigation: `holoqa_observe` takes a raw passthrough
-mode for exploration, which never produces evidence and never feeds a verdict.
+`agent-browser` directly. Mitigation: exploration that does not need to count as
+evidence can be done by the agent with `agent-browser` directly — it simply
+produces no capture, and therefore no verdict. (An earlier draft promised a raw
+passthrough mode on `holoqa_observe`; it was never built, so the promise was
+removed rather than left in the document.)
 
 **The XLSX template is still per-app.** M3 keeps HoloQA's own markdown/JSON
 report as the default and treats a workbook as an optional, configured output.

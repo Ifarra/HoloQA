@@ -63,12 +63,12 @@ def test_on_pins_an_assertion_to_a_named_capture(tmp_path):
     run = Run.create(tmp_path / "run", plan)
 
     api_evidence(
-        run, "S1", "step-s1-create",
+        run, "S1", "create",
         method="POST", url="http://x/api/orders",
         status=201, body={"id": "88", "status": "PENDING"},
     )
     api_evidence(
-        run, "S1", "step-s1-read",
+        run, "S1", "read",
         method="GET", url="http://x/api/orders/88",
         status=200, body={"id": "88", "status": "CONFIRMED"},
     )
@@ -88,12 +88,12 @@ def test_without_a_scope_the_same_plan_would_read_the_wrong_capture(tmp_path):
     run = Run.create(tmp_path / "run", plan)
 
     api_evidence(
-        run, "S1", "step-s1-create",
+        run, "S1", "create",
         method="POST", url="http://x/api/orders",
         status=201, body={"id": "88", "status": "PENDING"},
     )
     api_evidence(
-        run, "S1", "step-s1-read",
+        run, "S1", "read",
         method="GET", url="http://x/api/orders/88",
         status=200, body={"id": "88", "status": "CONFIRMED"},
     )
@@ -109,7 +109,7 @@ def test_a_scope_naming_a_missing_capture_blocks_rather_than_guesses(tmp_path):
     plan = _plan(tmp_path, SCOPED_PLAN)
     run = Run.create(tmp_path / "run", plan)
     api_evidence(
-        run, "S1", "step-s1-create",
+        run, "S1", "create",
         method="POST", url="http://x/api/orders",
         status=201, body={"id": "88", "status": "PENDING"},
     )
@@ -119,6 +119,66 @@ def test_a_scope_naming_a_missing_capture_blocks_rather_than_guesses(tmp_path):
     assert outcome == BLOCKED
     blocked = [item for item in results if item["ok"] is None]
     assert any("read" in item["detail"] for item in blocked)
+
+
+#: The decoy shape: a scope that is a *prefix* of a longer capture name. Both
+#: names contain the wanted string, so substring matching let the wrong capture
+#: decide the verdict — the same hole as `/api/orders` matching
+#: `/api/orders-archive`, and the same consequence: a PASS for a broken call.
+DECOY_PLAN = """
+meta:
+  app: scope
+steps:
+  - id: S1
+    title: the create call is the one being judged
+    expect:
+      - { api: { method: POST, path: /api/orders, status: 201 }, scope: orders }
+"""
+
+
+def test_a_scope_does_not_match_a_longer_capture_name(tmp_path):
+    plan = _plan(tmp_path, DECOY_PLAN)
+    run = Run.create(tmp_path / "run", plan)
+    # The call the plan means, and it failed.
+    api_evidence(run, "S1", "orders", method="POST", url="http://x/api/orders", status=500)
+    # A decoy whose name merely starts with the scope, captured later, healthy.
+    api_evidence(
+        run, "S1", "orders-archive",
+        method="POST", url="http://x/api/orders-archive", status=201,
+    )
+
+    outcome, results, _ = verdict_module.evaluate(plan, run, "S1")
+
+    assert outcome == FAIL, (
+        "the scoped assertion read the lookalike capture and passed a 500"
+    )
+    assert results[0]["ok"] is False
+
+
+def test_an_ambiguous_scope_blocks_rather_than_picking_the_newest(tmp_path):
+    """Two captures answering to one name is a plan bug, not a verdict.
+
+    Both files have the stem `orders`, so the scope does not say which one it
+    means. Reading the newest of them is exactly the arbitrary choice that made
+    the unscoped evaluator wrong, so the evaluator refuses instead.
+    """
+    plan = _plan(tmp_path, DECOY_PLAN)
+    run = Run.create(tmp_path / "run", plan)
+    api_evidence(run, "S1", "orders", method="POST", url="http://x/api/orders", status=500)
+    # A second capture with the same stem under a different name.
+    second = run.evidence_dir / "orders"
+    second.write_text(json.dumps({
+        "request": {"method": "POST", "url": "http://x/api/orders", "body": None},
+        "status": 201, "ok": True, "headers": {}, "elapsed_ms": 1,
+        "body": None, "body_text": None,
+    }), encoding="utf-8")
+    run.attach("S1", kind="api", path=second, target="http://x/api/orders")
+
+    outcome, results, _ = verdict_module.evaluate(plan, run, "S1")
+
+    assert outcome == BLOCKED, results
+    assert results[0]["ok"] is None
+    assert "matches 2" in results[0]["detail"], results[0]["detail"]
 
 
 def test_scope_is_accepted_by_the_loader(tmp_path):
@@ -152,7 +212,7 @@ steps:
       - { text_contains: Second, scope: after }
 """)
     run = Run.create(tmp_path / "run", plan)
-    for name, text in (("step-p1-before", "First"), ("step-p1-after", "Second")):
+    for name, text in (("before", "First"), ("after", "Second")):
         path = run.evidence_dir / f"{name}.json"
         path.write_text(json.dumps({
             "url": "http://x/", "title": "t", "text": text,

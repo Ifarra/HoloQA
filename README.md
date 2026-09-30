@@ -36,7 +36,8 @@ model.
 
 ## Contents
 
-- [Why](#why) · [Install](#install) · [First run](#first-run)
+- [Why](#why) · [Install](#install) · [Install with an AI agent](#install-with-an-ai-agent)
+- [First run](#first-run)
 - [The plan file](#the-plan-file) · [Assertions](#assertions) · [Verdicts](#verdicts)
 - [Worked example](#worked-example) · [MCP tools](#mcp-tools) · [CLI](#cli)
 - [Guardrails](#guardrails) · [Run directory](#run-directory)
@@ -99,7 +100,7 @@ Check it before trusting it:
 
 ```bash
 holoqa doctor       # is agent-browser present? what MCP entry do I need?
-holoqa selftest     # 18 guardrail checks, offline, no browser, no network
+holoqa selftest     # 25 guardrail checks, offline, no browser, no network
 ```
 
 `doctor` prints the exact JSON to paste, and tells you what is missing:
@@ -132,7 +133,75 @@ MCP entry for a clone — absolute path to the repo:
 
 ---
 
+## Install with an AI agent
+
+If you already have a coding agent (Claude Code, Cursor, Codex, OpenCode), it
+can do the whole install for you. Paste one prompt and answer its questions.
+
+### The prompt
+
+```
+Install HoloQA by running this exact command:
+uv tool install git+https://github.com/Ifarra/HoloQA
+
+Then install the browser driver it depends on:
+npm install -g agent-browser
+
+Verify both with: holoqa doctor
+
+Then add this entry to your own MCP client config and tell me to restart you:
+{ "mcpServers": { "holoqa": { "command": "holoqa", "args": [] } } }
+
+After restarting, work in this project and do the following:
+1. Run `holoqa init --app <name of this project> --url <its local or staging URL>`
+2. Read @README.md, @package.json and @docs/ (or whatever describes this app)
+   to learn what the application actually does.
+3. Open the application in a browser and explore it enough to know its real
+   user journeys.
+4. Fill in holoqa.plan.yaml: one step per user-visible behaviour, each with
+   assertions from the format reference you get by calling holoqa_plan_validate
+   with no arguments.
+5. Run `holoqa validate holoqa.plan.yaml` until it reports no errors.
+6. Show me the plan and explain every step you wrote before running it.
+```
+
+Replace `<name of this project>` and `<its local or staging URL>` with real
+values, and point the `@`-mentions at the files that actually describe your app.
+
+### What each part does
+
+| Part | What it does, and why it is there |
+|---|---|
+| `Install HoloQA by running this exact command:` | Agents summarise and improvise. `exact` is the instruction that stops yours from rewriting the URL or reaching for PyPI, where HoloQA is not published. |
+| `uv tool install git+https://github.com/Ifarra/HoloQA` | Installs the `holoqa` command. `uv tool install` puts it on your `PATH` in its own isolated environment, so it cannot disturb any project's dependencies. `git+https://…` means "install from this Git repo" — there is no `pip install holoqa`. |
+| `npm install -g agent-browser` | HoloQA does not drive a browser itself. This CLI does, and HoloQA calls it as a subprocess. Without it, `holoqa doctor` fails and no capture can happen. |
+| `Verify both with: holoqa doctor` | Makes the agent check its own work instead of assuming the install succeeded. `doctor` also prints the exact MCP JSON for *your* machine, which is more reliable than the copy in this README. |
+| `add this entry to your own MCP client config` | An MCP server is not usable until the client knows about it. Only the agent knows where its own config lives (`~/.claude.json`, Cursor settings, `~/.codex/config.toml`), so it edits it rather than you hunting for the file. |
+| `and tell me to restart you` | MCP servers are read at client startup. The agent cannot use HoloQA in the session that installed it, so it has to ask you to restart. |
+| `{ "mcpServers": { "holoqa": … } }` | The entry itself. `"command": "holoqa"` is enough because `uv tool install` put it on `PATH`; the empty `"args": []` is the stdio default — no port, no auth, no network. |
+| `work in this project` | Scopes the agent to the repository under test, so the plan lands beside the code it describes. |
+| `holoqa init --app <name> --url <URL>` | Scaffolds `holoqa.plan.yaml` with one working step and commented examples. `--app` names the plan (it appears in the report title); `--url` is the base URL the plan's relative `path:` assertions resolve against. It refuses to overwrite an existing plan. |
+| `Read @README.md, @package.json and @docs/` | The agent cannot write a plan for an application it has not understood. The `@`-mentions pull those files into its context; point them at whatever actually describes *your* app. |
+| `Open the application in a browser and explore it` | A plan derived only from docs describes the app the docs claim, not the app that exists. Exploring first is what makes the steps match real screens and real routes. |
+| `one step per user-visible behaviour` | The unit of a plan is a behaviour worth holding a release for — not a click. This is the sentence that keeps the plan from becoming a script. |
+| `assertions from the format reference` | `holoqa_plan_validate` with **no arguments** returns the whole plan format: the 11 assertion kinds, `scope`, `requires`, `blocked_if`, actors, and a starter template. The agent reads the schema instead of guessing at it. |
+| `holoqa validate holoqa.plan.yaml` | Lints the plan statically. It catches unknown assertion kinds, a missing `status`, forward references to variables no earlier step captures, and the YAML brace trap — all before anything runs. |
+| `Show me the plan and explain every step` | The plan is the contract that decides every verdict, which is why a human owns it. This is the review gate; **do not skip it.** An agent-authored plan you have not read is an agent grading its own homework. |
+
+### What you should check afterwards
+
+- `holoqa validate holoqa.plan.yaml` → `"status": "ok"`, and read the warnings.
+  A step whose only assertion is `screenshot: required` passes on the existence
+  of a file, so the linter flags it.
+- Every step's `expect:` should assert something a machine can check. A plan of
+  screenshots is a photo album, not a checklist.
+- Commit `holoqa.plan.yaml`. It is the reviewed artifact; the run output is not.
+
+---
+
 ## First run
+
+By hand, without an agent:
 
 ```bash
 cd ~/code/your-app
@@ -217,6 +286,9 @@ steps:
 | `depends_on` | steps that must PASS first; must appear earlier in the file |
 | `route` / `do` | human-readable context for the agent — never executed |
 | `expect` | the assertions HoloQA evaluates |
+| `requires` | preconditions checked **before** the assertions, against captures that already exist. Unmet → `BLOCKED` with the plan's own cause, and the report groups those steps by root cause |
+| `actor` | the browser identity this step runs in (see `meta.actors`) |
+| `strength` / `weak_reason` | `weak` marks a PASS that still needs a human to read the evidence; the report counts them |
 | `blocked_if` | when an assertion is **violated**, report BLOCKED carrying this cause instead of FAIL |
 
 `blocked_if` is evaluated, not decorative. A step that declares one and then
@@ -225,6 +297,47 @@ may not be able to reach that step — a feature flag that is off is not a defec
 in the product. The violation is not hidden: the assertion's real detail is kept
 in the report, after the plan's cause. A step with no `blocked_if` still reports
 FAIL, so the downgrade is per-step and deliberate.
+
+It can also be written on a single assertion, which is the narrower form and
+the one to prefer when only part of the step depends on that flag:
+
+```yaml
+expect:
+  - { api: { method: GET, path: /api/orders, status: 200 },
+      blocked_if: the orders service is disabled in this environment }
+  - text_contains: Checkout
+```
+
+Here a disabled orders service is BLOCKED, but a checkout page that failed to
+render is still FAIL — a session that expired mid-step is a defect, not the
+feature flag the plan named. A cause on the step covers every assertion that
+does not override it.
+
+### Multi-actor runs
+
+A plan that tests ownership needs more than one identity, so a step declares
+which one it runs in:
+
+```yaml
+meta:
+  actors:
+    admin:   { as: admin@example.test,   password: ${ADMIN_PASSWORD} }
+    proctor: { as: proctor@example.test, password: ${PROCTOR_PASSWORD} }
+    anon:    {}                       # no `as` means a clean, logged-out session
+steps:
+  - id: B1
+    actor: proctor
+    title: A proctor cannot see another user's findings
+    expect: ...
+```
+
+Each actor gets its own isolated browser session, so an admin step and a proctor
+step no longer share one cookie jar. Credentials must come from the environment
+— a literal password in a plan is **refused**, because the plan is committed
+beside the code. Evidence is tagged with the session that produced it, and a
+step whose evidence was captured in the wrong session is `BLOCKED`, never
+counted as a pass. The agent cannot choose the session: passing an `actor` that
+the plan did not ask for is an error.
 
 ### Variables
 
@@ -253,11 +366,19 @@ language.
 | `url_matches` | regex against the captured URL | a `dom` capture |
 | `text_contains` | substring of visible page text | a `dom` capture |
 | `text_not_contains` | text that must be absent | a `dom` capture |
-| `api` | `{method, path, status}` — status may be an int or a list | an `api` capture |
+| `api` | `{method, path, status}` — `status` is **required**, and may be an int or a list | an `api` capture |
 | `json` | subset or JSONPath match against the last body | an `api` capture |
+| `header` | a response header: a name alone (must be present) or `{name, contains\|equals\|matches}` | an `api` capture |
+| `file` | the contents of a download: `{name_matches, size_gt, size_lt, contains, magic}` | a `download` capture |
 | `screenshot` | `required` — a non-empty image exists | a `screenshot` capture |
 | `changed` | `dom` or `api` — two captures, taken apart, must differ | two captures |
 | `capture` | `{name: $.json.path}` — binds a value for later steps | an `api` capture |
+
+**A typo cannot weaken an assertion.** Unknown keys inside `api`, `file`, and
+`header` assertions are refused at load, `api` requires a `status`, and every
+regex is compiled when the plan is read. `{file: {size_gtt: 1000000}}` and
+`{header: {name: cache-control, contain: no-store}}` used to load, silently
+ignore the misspelled key, and report PASS.
 
 **`api` path matching.** `path` is matched on path *segments*, so `/api/orders`
 matches `/api/orders`, `/api/orders?page=2` and `/api/orders/88`, but never
@@ -269,8 +390,17 @@ strict enough:
 - api: { method: GET, path_regex: "^/api/orders/[0-9]+$", status: 200 }
 ```
 
-An unrecognised key inside an `api` assertion is refused at load time, so a
-typo cannot silently run with a default you never asked for.
+**`scope`** pins an assertion to one capture when a step makes more than one
+call. The name must match the capture's file stem, its target, or the target's
+URL path **exactly** — `scope: orders` does not match `orders-archive`, because
+a decoy whose name merely contains the wanted one used to decide the verdict.
+A scope that matches more than one capture is `BLOCKED` rather than guessed:
+
+```yaml
+expect:
+  - { api: { method: POST, path: /api/orders, status: 201 }, scope: create }
+  - { json: { status: CONFIRMED }, scope: "/api/orders/88" }
+```
 
 **Negative tests** use a status list:
 
@@ -279,7 +409,9 @@ typo cannot silently run with a default you never asked for.
 ```
 
 **`changed`** proves something actually moved. Two byte-identical captures FAIL;
-one capture is BLOCKED, not PASS. Use it for progress bars, regenerated
+one capture is BLOCKED, not PASS. Add `scope` to compare the captures of one
+subject rather than every capture of that kind — without it, a second call to an
+unrelated endpoint counted as a change. Use it for progress bars, regenerated
 documents, and before/after state.
 
 **`json`** matches a subset, so extra keys are fine:
@@ -522,7 +654,7 @@ and Assertions. `q` exits without deleting run artifacts.
 
 ## Guardrails
 
-Ten rules, all covered by `holoqa selftest`.
+Ten rules, all covered by `holoqa selftest`, which runs 25 checks in total.
 
 | # | Rule |
 |---|---|
@@ -536,6 +668,13 @@ Ten rules, all covered by `holoqa selftest`.
 | 8 | A known-behaviour citation must reference an id in the plan |
 | 9 | An uncaptured assertion yields `BLOCKED`, never `FAIL` |
 | 10 | The plan is validated statically before anything runs |
+
+Rule 10 is where a typo stops being silent. Refused at load: an `api`
+assertion with no `status` (it used to pass on any response, including a 500 on
+a broken endpoint), an unknown key in an `api` / `file` / `header` assertion, an
+invalid regex anywhere (it used to raise an uncaught `re.error` mid-judgement),
+a `changed` naming a kind that does not exist, and a plan with **no steps** —
+which used to validate, package, and decide `RELEASE`.
 
 Plus the one that is not negotiable: **an agent can only assert `BLOCKED`.**
 
@@ -682,8 +821,8 @@ useless.
 
 ```bash
 uv sync --dev
-uv run pytest -q              # 94 tests (3 real-browser tests are opt-in)
-uv run holoqa selftest        # 18 guardrail checks
+uv run pytest -q              # 183 tests (3 real-browser tests are opt-in)
+uv run holoqa selftest        # 25 guardrail checks
 uv run holoqa validate examples/wolvesight.plan.yaml
 # Optional: run the three real-browser tests against an isolated session.
 $env:HOLOQA_RUN_REAL_BROWSER="1"; uv run pytest -q tests/test_e2e_browser.py

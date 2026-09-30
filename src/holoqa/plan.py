@@ -115,13 +115,15 @@ class Step(BaseModel):
             if True in assertion and "scope" not in assertion:
                 assertion["scope"] = assertion.pop(True)
             keys = set(assertion)
-            # An entry is `{kind: value}`, optionally with a second key naming
-            # which capture it applies to.
-            extra = keys - {"scope"}
+            # An entry is `{kind: value}`, optionally with `scope: <capture>` to
+            # pin it to one capture, and optionally with its own `blocked_if` to
+            # say which environment cause excuses *this* violation. A cause on
+            # the step is inherited by every assertion that does not override it.
+            extra = keys - {"scope", "blocked_if"}
             if len(extra) != 1:
                 raise ValueError(
                     f"each entry must be one assertion, optionally with "
-                    f"`scope: <capture>`; got {assertion!r}"
+                    f"`scope: <capture>` and `blocked_if: <cause>`; got {assertion!r}"
                 )
             (kind,) = extra
             if kind not in ASSERTION_KINDS:
@@ -130,18 +132,44 @@ class Step(BaseModel):
                 )
         return value
 
-    def _entries(self, field: list[dict[str, Any]]) -> list[tuple[str, Any, str]]:
+    @staticmethod
+    def _entries(field: list[dict[str, Any]]) -> list[tuple[str, Any, str]]:
         out: list[tuple[str, Any, str]] = []
         for item in field:
-            pairs = [(k, v) for k, v in item.items() if k != "scope"]
+            pairs = [(k, v) for k, v in item.items() if k not in ("scope", "blocked_if")]
             kind, value = pairs[0]
             out.append((kind, value, str(item.get("scope", ""))))
+        return out
+
+    @staticmethod
+    def _entries_with_causes(
+        field: list[dict[str, Any]], default_cause: str
+    ) -> list[tuple[str, Any, str, str]]:
+        """``(kind, value, scope, blocked_if)``, inheriting the step's cause.
+
+        The step-level ``blocked_if`` is the default and a per-assertion one
+        overrides it, which is how a step with mixed expectations narrows the
+        excuse to the assertion it applies to: declaring the cause on the step
+        covers *every* violated assertion on it, including one that failed for
+        an unrelated reason.
+        """
+        out: list[tuple[str, Any, str, str]] = []
+        for item in field:
+            pairs = [(k, v) for k, v in item.items() if k not in ("scope", "blocked_if")]
+            kind, value = pairs[0]
+            cause = str(item.get("blocked_if") or default_cause or "").strip()
+            out.append((kind, value, str(item.get("scope", "")), cause))
         return out
 
     @property
     def assertions(self) -> list[tuple[str, Any, str]]:
         """``(kind, value, scope)`` for each assertion. ``scope`` is ``""`` unset."""
         return self._entries(self.expect)
+
+    @property
+    def assertions_with_causes(self) -> list[tuple[str, Any, str, str]]:
+        """``(kind, value, scope, blocked_if)`` for each assertion."""
+        return self._entries_with_causes(self.expect, self.blocked_if)
 
     @property
     def requirements(self) -> list[tuple[str, Any, str]]:
@@ -339,6 +367,16 @@ def load(path: str | Path) -> Plan:
 
 def _validate_graph(plan: Plan) -> None:
     """Structural checks a schema cannot express."""
+    # A plan with no steps validates, packages, and releases: `decision()` counts
+    # only FAIL and BLOCKED, so zero steps was the same as zero failures. An
+    # empty checklist holding a release is the single cheapest way to ship a
+    # green result that means nothing, so it is refused here.
+    if not plan.steps:
+        raise PlanError(
+            "a plan must define at least one step; an empty checklist cannot "
+            "decide anything"
+        )
+
     seen: set[str] = set()
     for step in plan.steps:
         if step.id in seen:
@@ -396,28 +434,138 @@ def _validate_actors(plan: Plan) -> None:
             )
 
 
-#: Recognised keys inside an ``api`` assertion mapping. An unknown key is a
+#: Recognised keys inside a ``file`` assertion. Same reasoning as
+#: :data:`API_ASSERTION_KEYS`: ``size_gtt`` or ``name_matchz`` used to be accepted
+#: and then ignored, so a step that meant to prove a 1 MB CSV had arrived was
+#: satisfied by an 8-byte file. Every key given must hold, so an unrecognised one
+#: silently weakens the assertion instead of failing it.
+FILE_ASSERTION_KEYS = ("name_matches", "size_gt", "size_lt", "contains", "magic")
+
+#: Recognised keys inside a ``header`` assertion. ``contains`` has no
+#: abbreviation, and ``contain`` is the typo a plan author writes: it was
+#: accepted, ignored, and the assertion degraded to "the header exists".
+HEADER_ASSERTION_KEYS = ("name", "contains", "equals", "matches")
+
+#: Capture kinds ``changed`` can compare. A typo here (``changed: domm``) used to
+#: fall through to a count of zero captures and report BLOCKED with a message
+#: about needing two captures, which reads as a missing capture rather than a
+#: misspelled kind.
+CHANGED_KINDS = ("dom", "api")
+
+
+#: Recognised keys inside an ``api`` assertion. An unknown key is a
 #: plan typo that would otherwise be ignored silently — the assertion would run
 #: with a default it never asked for.
 API_ASSERTION_KEYS = ("method", "path", "status", "path_exact", "path_regex")
 
 
+def _regex_source(kind: str, value: Any) -> str:
+    """The regular expression an assertion will compile at judge time, or ``""``.
+
+    Collecting these at load time is what turns a plan typo from an uncaught
+    ``re.error`` in the middle of judging into a refusal before the run starts,
+    which is exactly what guardrail 10 promises.
+    """
+    if kind == "url_matches" and isinstance(value, str):
+        return value
+    if kind == "api" and isinstance(value, dict) and value.get("path_regex"):
+        return str(value["path_regex"])
+    if kind == "header" and isinstance(value, dict) and value.get("matches"):
+        return str(value["matches"])
+    if kind == "file" and isinstance(value, dict) and value.get("name_matches"):
+        return str(value["name_matches"])
+    return ""
+
+
 def _validate_assertions(plan: Plan) -> None:
     for step in plan.steps:
         for kind, value, _on in step.assertions:
-            if kind == "api" and isinstance(value, dict):
-                unknown = [key for key in value if key not in API_ASSERTION_KEYS]
-                if unknown:
-                    raise PlanError(
-                        f"step {step.id}: api assertion has unknown key(s) "
-                        f"{', '.join(map(repr, unknown))}; choose from "
-                        f"{', '.join(API_ASSERTION_KEYS)}"
-                    )
-                if value.get("path_exact") and value.get("path_regex"):
-                    raise PlanError(
-                        f"step {step.id}: api assertion cannot set both path_exact "
-                        "and path_regex"
-                    )
+            _validate_one_assertion(step.id, kind, value)
+        for kind, value, _on in step.requirements:
+            _validate_one_assertion(step.id, kind, value, where="requires")
+
+
+def _validate_one_assertion(
+    step_id: str, kind: str, value: Any, *, where: str = "expect"
+) -> None:
+    """Refuse a plan typo before it can quietly weaken an assertion."""
+    if kind == "api" and isinstance(value, dict):
+        unknown = [key for key in value if key not in API_ASSERTION_KEYS]
+        if unknown:
+            raise PlanError(
+                f"step {step_id}: api assertion has unknown key(s) "
+                f"{', '.join(map(repr, unknown))}; choose from "
+                f"{', '.join(API_ASSERTION_KEYS)}"
+            )
+        if value.get("path_exact") and value.get("path_regex"):
+            raise PlanError(
+                f"step {step_id}: api assertion cannot set both path_exact "
+                "and path_regex"
+            )
+        # A status-less api assertion returned PASS on any response at all, so a
+        # 500 on a broken endpoint satisfied `{api: {method: GET, path: /x}}`.
+        # Status is the assertion; require it rather than defaulting it away.
+        if value.get("status") is None:
+            raise PlanError(
+                f"step {step_id}: api assertion needs a `status` (an int or a "
+                "list of ints); without one any response satisfies it"
+            )
+
+    if kind == "file":
+        if not isinstance(value, dict) or not value:
+            raise PlanError(
+                f"step {step_id}: file assertion must be a mapping of "
+                f"{', '.join(FILE_ASSERTION_KEYS)}"
+            )
+        unknown = [key for key in value if key not in FILE_ASSERTION_KEYS]
+        if unknown:
+            raise PlanError(
+                f"step {step_id}: file assertion has unknown key(s) "
+                f"{', '.join(map(repr, unknown))}; choose from "
+                f"{', '.join(FILE_ASSERTION_KEYS)}"
+            )
+
+    if kind == "header":
+        if isinstance(value, dict):
+            unknown = [key for key in value if key not in HEADER_ASSERTION_KEYS]
+            if unknown:
+                raise PlanError(
+                    f"step {step_id}: header assertion has unknown key(s) "
+                    f"{', '.join(map(repr, unknown))}; choose from "
+                    f"{', '.join(HEADER_ASSERTION_KEYS)}"
+                )
+            if not value.get("name"):
+                raise PlanError(f"step {step_id}: header assertion needs a name")
+            given = [key for key in ("contains", "equals", "matches") if value.get(key)]
+            if len(given) > 1:
+                raise PlanError(
+                    f"step {step_id}: header assertion sets "
+                    f"{', '.join(given)}; pick one"
+                )
+        elif not isinstance(value, str):
+            raise PlanError(
+                f"step {step_id}: header assertion must be a name or a mapping"
+            )
+
+    if kind == "changed":
+        target = value if isinstance(value, str) else (
+            value.get("kind", "") if isinstance(value, dict) else ""
+        )
+        if target not in CHANGED_KINDS:
+            raise PlanError(
+                f"step {step_id}: changed must compare "
+                f"{' or '.join(CHANGED_KINDS)}, got {target!r}"
+            )
+
+    source = _regex_source(kind, value)
+    if source:
+        try:
+            re.compile(source)
+        except re.error as error:
+            raise PlanError(
+                f"step {step_id}: {where} {kind} has an invalid regular "
+                f"expression {source!r}: {error}"
+            ) from error
 
 
 def _reject_cycles(plan: Plan) -> None:
@@ -440,8 +588,10 @@ def _validate_bindings(plan: Plan) -> None:
     """
     bound: set[str] = set()
     for step in plan.steps:
-        for kind, value, _on in step.assertions:
-            for placeholder in _referenced_vars(value):
+        for kind, value, scope in step.assertions:
+            # The scope is interpolated at judge time, so a `{name}` in it is a
+            # forward reference like any other and must be checked here too.
+            for placeholder in _referenced_vars(value) | _referenced_vars(scope):
                 if placeholder not in bound:
                     raise PlanError(
                         f"step {step.id} uses {{{placeholder}}} but no earlier step "
@@ -604,8 +754,9 @@ FORMAT_REFERENCE = {
         "text_contains": "substring of visible page text (needs a dom capture)",
         "text_not_contains": "text that must be absent (needs a dom capture)",
         "api": (
-            "{method, path, status} — status may be an int or a list. `path` is "
-            "matched on path segments; add `path_exact: true` or "
+            "{method, path, status} — `status` is REQUIRED and may be an int or a "
+            "list of ints; without it any response satisfies the assertion. `path` "
+            "is matched on path segments; add `path_exact: true` or "
             "`path_regex: <regex>`. The query string is ignored."
         ),
         "json": "subset or JSONPath match against the last api capture body",
@@ -618,14 +769,21 @@ FORMAT_REFERENCE = {
             "contains, magic} — every key given must hold"
         ),
         "screenshot": "'required' — a non-empty image exists for this step",
-        "changed": "'dom' or 'api' — two captures, taken apart, must differ",
+        "changed": (
+            "'dom' or 'api' — two captures of that kind, taken apart, must differ. "
+            "Add `scope: <capture>` to compare the captures that belong to one "
+            "named capture instead of every capture of the kind."
+        ),
         "capture": "{name: $.json.path} — binds a value for later steps",
     },
     "scoping": (
         "By default an assertion reads the most recent capture of its kind. Add "
         "`scope: <name>` to pin it to a specific capture when a step makes more "
         "than one call: `- {json: {status: PENDING}, scope: create}`. The name "
-        "matches the capture's file stem or target."
+        "must match the capture's file stem or its target exactly — `scope: "
+        "orders` does not match `orders-archive` — and a scope that matches more "
+        "than one capture is BLOCKED rather than guessed, so name captures so the "
+        "scope is unambiguous."
     ),
     "requires": (
         "Preconditions, checked by HoloQA before the step's assertions. "
@@ -634,6 +792,16 @@ FORMAT_REFERENCE = {
         "and the report groups such steps by root cause. This is how a step "
         "reports 'the fixture is missing' without you having to write it in "
         "prose."
+    ),
+    "blocked_if": (
+        "A cause for a violation the plan expects in this environment, so it "
+        "reports BLOCKED instead of FAIL: `blocked_if: the orders service is "
+        "disabled in this environment`. Set it on the step to cover its "
+        "assertions, or on a single assertion to scope the excuse to that one: "
+        "`- {api: {method: GET, path: /api/orders, status: 200}, blocked_if: the "
+        "orders service is disabled}`. An assertion with no cause still reports "
+        "FAIL, so an unrelated failure is never excused by another assertion's "
+        "cause."
     ),
     "strength": (
         "`strength: weak` plus `weak_reason: <why>` marks a step whose PASS "
@@ -647,6 +815,10 @@ FORMAT_REFERENCE = {
     "rules": [
         "A step may only reference {variables} captured by an earlier step.",
         "depends_on must point at steps that appear earlier in the file.",
+        "An `api` assertion needs a `status`; a status-less one passes on any response.",
+        "A plan needs at least one step; an empty checklist cannot decide a release.",
+        "Unknown keys in an api/file/header assertion are refused at load, and "
+        "every regex is compiled at load, so a typo cannot weaken a check silently.",
         "Anything not expressible as an assertion is BLOCKED with a cause, never a soft pass.",
     ],
     "actors": (
