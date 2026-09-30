@@ -1261,9 +1261,18 @@ class HoloQATui(App[None]):
         self._set_safety(f"Log copied to {self.log_path}{suffix}")
 
     @staticmethod
-    def _copy_text(payload: str) -> bool:
-        """Copy Unicode text without invoking a shell."""
-        clip = shutil.which("clip") if os.name == "nt" else None
+    def _copy_text(payload: str, platform: str | None = None) -> bool:
+        """Copy Unicode text without invoking a shell.
+
+        ``platform`` defaults to :data:`os.name` and exists so the Windows branch
+        can be tested on Linux. A test that patched ``os.name`` instead would
+        mutate a process-global that `pathlib` reads at instantiation time: on
+        Linux every later `Path(...)` became a `WindowsPath` and raised from
+        inside pytest's own reporting, turning one assertion into a run-wide
+        INTERNALERROR. Passing the platform keeps the branch testable and the
+        process intact.
+        """
+        clip = shutil.which("clip") if (platform or os.name) == "nt" else None
         if clip:
             try:
                 # Do not let subprocess inherit cp1252 for stdin: provider

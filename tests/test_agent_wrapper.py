@@ -153,8 +153,12 @@ steps:
       - text_contains: Fixture ready
       - screenshot: required
 """, encoding="utf-8")
-    browser = tmp_path / "agent-browser.cmd"
-    browser.write_text(f'@echo off\r\n"{sys.executable}" "%~dp0fake_browser.py" %*\r\n', encoding="utf-8")
+    browser = tmp_path / ("agent-browser.cmd" if os.name == "nt" else "agent-browser")
+    if os.name == "nt":
+        browser.write_text(f'@echo off\r\n"{sys.executable}" "%~dp0fake_browser.py" %*\r\n', encoding="utf-8")
+    else:
+        browser.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$(dirname "$0")/fake_browser.py" "$@"\n', encoding="utf-8")
+        browser.chmod(0o755)
     (tmp_path / "fake_browser.py").write_text("""import json, sys
 from pathlib import Path
 command = sys.argv[1]
@@ -165,8 +169,12 @@ elif command == 'eval':
 else:
     raise SystemExit('unexpected browser command: ' + command)
 """, encoding="utf-8")
-    provider = tmp_path / f"{provider_name}.cmd"
-    provider.write_text(f'@echo off\r\n"{sys.executable}" "%~dp0fake_coder.py" %*\r\n', encoding="utf-8")
+    provider = tmp_path / f"{provider_name}.cmd" if os.name == "nt" else tmp_path / provider_name
+    if os.name == "nt":
+        provider.write_text(f'@echo off\r\n"{sys.executable}" "%~dp0fake_coder.py" %*\r\n', encoding="utf-8")
+    else:
+        provider.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$(dirname "$0")/fake_coder.py" "$@"\n', encoding="utf-8")
+        provider.chmod(0o755)
     (tmp_path / "fake_coder.py").write_text("""import asyncio, json, sys
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client

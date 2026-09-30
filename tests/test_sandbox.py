@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import shutil
 from urllib.request import urlopen
+
+import pytest
 
 from holoqa.cli import _tui_mode, main
 from holoqa.sandbox import TuiSandbox
 
 
+@pytest.mark.skipif(
+    shutil.which("git") is None,
+    reason="the sandbox creates a git repository, so git must be on PATH",
+)
 def test_tui_sandbox_is_local_git_workspace_and_serves_fixture() -> None:
     sandbox = TuiSandbox.create()
     try:

@@ -107,10 +107,18 @@ async def test_theme_choice_persists_between_tui_instances(tmp_path, monkeypatch
 
 @pytest.mark.anyio
 async def test_steps_sidebar_is_a_real_scroll_container() -> None:
-    app = HoloQATui.demo(animated=True)
+    """The sidebar must be a scroll container that actually moves.
+
+    Uses the static demo on purpose. The animated one rewrites the step list on
+    a timer, so between `scroll_end` and the assertion the content can be
+    re-laid-out and the scroll position reset to 0 — the widget was fine, the
+    test was racing its own fixture. A fixed list makes the property under test
+    (this widget scrolls) deterministic.
+    """
+    app = HoloQATui.demo()
     async with app.run_test(size=(100, 30)) as pilot:
         sidebar = app.query_one("#step-scroll", VerticalScroll)
-        assert sidebar.max_scroll_y > 0
+        assert sidebar.max_scroll_y > 0, "the step list should overflow this size"
         sidebar.scroll_end(animate=False)
         await pilot.pause()
         assert sidebar.scroll_y == sidebar.max_scroll_y
@@ -293,7 +301,16 @@ async def test_copy_log_handles_unicode_windows_output(tmp_path, monkeypatch) ->
         captured.update(kwargs)
         return type("Completed", (), {"returncode": 0})()
 
-    monkeypatch.setattr(tui_module.os, "name", "nt")
+    # The platform is passed in rather than patched onto `os.name`. Patching the
+    # global makes `pathlib` build WindowsPath on Linux, which raises from inside
+    # pytest's own failure reporting — one assertion became an INTERNALERROR that
+    # aborted the run. `clip` is still stubbed because the point here is the
+    # Unicode encoding of stdin, not whether Windows is present.
+    real_copy_text = HoloQATui._copy_text
+    monkeypatch.setattr(
+        HoloQATui, "_copy_text",
+        staticmethod(lambda payload, platform=None: real_copy_text(payload, "nt")),
+    )
     monkeypatch.setattr(tui_module.shutil, "which", lambda name: "clip.exe")
     monkeypatch.setattr(tui_module.subprocess, "run", fake_run)
     app = HoloQATui.demo()
