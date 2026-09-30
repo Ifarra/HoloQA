@@ -22,6 +22,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.widgets import Input, OptionList, RichLog, Static, TabbedContent, TabPane
 from textual.widgets.option_list import Option
 from rich.text import Text
@@ -1062,14 +1063,24 @@ class HoloQATui(App[None]):
         self.query_one("#step-clock", Static).update(f"step elapsed: {step_elapsed:0.1f}s")
 
     def _refresh_activity(self) -> None:
-        self._render_topbar()
-        self._render_activity()
-        # The interval that already exists for the clock is also the right place
-        # to re-read the authoritative run record. Provider protocol is a hint;
-        # run.json is what HoloQA actually decided. Without this the step list
-        # only updated when the agent stopped, so a finished step showed as
-        # PENDING for the whole run.
-        self._sync_from_run()
+        # The 1-second interval can fire after the app has exited, when the
+        # widgets are already gone: `query_one` then raises `NoMatches` from
+        # inside the timer, which surfaces as an error on the way out. Exiting is
+        # a normal outcome, so a timer tick during teardown is a no-op.
+        if not self.is_mounted:
+            return
+        try:
+            self._render_topbar()
+            self._render_activity()
+            # The interval that already exists for the clock is also the right
+            # place to re-read the authoritative run record. Provider protocol is
+            # a hint; run.json is what HoloQA actually decided. Without this the
+            # step list only updated when the agent stopped, so a finished step
+            # showed as PENDING for the whole run.
+            self._sync_from_run()
+        except NoMatches:
+            # A widget was removed between the guard and the query.
+            return
 
     def _sync_from_run(self) -> None:
         """Re-read run.json and reflect it in the step list and verdict card.
