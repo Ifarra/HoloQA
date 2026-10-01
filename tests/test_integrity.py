@@ -377,6 +377,40 @@ def test_attesting_records_that_a_human_reviewed_it(tmp_path):
     assert packaged["integrity"] == "attested"
 
 
+def test_attest_works_on_a_run_this_process_never_created(tmp_path):
+    """The upgrade path: a run from an older HoloQA has no ledger to adopt.
+
+    `attest` is the only way a human can accept such a run, so it has to work
+    with no ledger present at all — otherwise the upgrade strands every existing
+    run as permanently unverifiable.
+    """
+    plan = _plan(tmp_path)
+    run = Run.create(tmp_path / "run", plan)
+    _api_evidence(run, "A1", "orders")
+    _screenshot(run, "A1")
+    verdict_module.evaluate(plan, run, "A1")
+    run.set_verdict("A1", PASS, note="", assertions=[], by="holoqa")
+    run_module.forget_ledger(run.dir)
+
+    # A run with no pinned plan, the way an older HoloQA left it.
+    run.plan_pin.unlink()
+    fresh = Run(run.dir)
+    assert fresh.integrity()["status"] == "unverified"
+
+    fresh.attest(by="Fauzan", reason="read the evidence by hand before upgrading")
+    assert fresh.integrity()["status"] == "attested"
+
+    # And it still refuses to be judged, because there is no pinned contract.
+    with pytest.raises(GuardrailError) as caught:
+        fresh.plan_for_judging()
+    assert "no pinned plan" in str(caught.value)
+
+    # But it can be packaged and decided, because a human vouched for it.
+    packaged = report_module.package(fresh)
+    assert packaged["decision"] == "RELEASE"
+    assert packaged["integrity"] == "attested"
+
+
 def test_tampering_is_reported_even_without_a_ledger(tmp_path):
     """The hash check needs no ledger, so it is the one that always works."""
     plan = _plan(tmp_path)

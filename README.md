@@ -36,7 +36,7 @@ model.
 
 ## Contents
 
-- [Why](#why) · [Install](#install) · [Install with an AI agent](#install-with-an-ai-agent)
+- [Why](#why) · [Install](#install) · [Updating](#updating) · [Install with an AI agent](#install-with-an-ai-agent)
 - [First run](#first-run)
 - [The plan file](#the-plan-file) · [Assertions](#assertions) · [Verdicts](#verdicts)
 - [Worked example](#worked-example) · [MCP tools](#mcp-tools) · [CLI](#cli)
@@ -100,7 +100,7 @@ Check it before trusting it:
 
 ```bash
 holoqa doctor       # is agent-browser present? what MCP entry do I need?
-holoqa selftest     # 25 guardrail checks, offline, no browser, no network
+holoqa selftest     # 30 guardrail checks, offline, no browser, no network
 ```
 
 `doctor` prints the exact JSON to paste, and tells you what is missing:
@@ -112,6 +112,44 @@ agent-browser    agent-browser 0.27.0
 MCP client entry:
   { "mcpServers": { "holoqa": { "command": "holoqa", "args": [] } } }
 ```
+
+### Updating
+
+HoloQA is installed from this repository rather than from PyPI, so there is no
+version to resolve and `uv tool upgrade holoqa` answers **"Nothing to upgrade"**.
+Re-run the install command instead — it replaces the tool in place:
+
+```bash
+uv tool install git+https://github.com/Ifarra/HoloQA      # no --force needed
+```
+
+On a OneDrive- or cloud-synced checkout, add `UV_LINK_MODE=copy` (see
+Troubleshooting). Then restart your MCP client: it reads the server list at
+startup, so the new build is not picked up in the session that installed it.
+
+Confirm which build you are running:
+
+```bash
+holoqa selftest        # the count is the version marker
+```
+
+The count changes as guardrails are added — 25 before the integrity work, 30
+after — so a `selftest` that prints 25 means the update did not take.
+
+**Your existing runs are not migrated, and that is deliberate.** A run created
+before this version has no `plan.pinned.yaml` and no ledger, so HoloQA cannot
+establish what it judged:
+
+- `holoqa verify` reports it `unverified` and exits 2.
+- Judging it is refused with *"this run has no pinned plan"* rather than guessed.
+- `holoqa attest --run-dir <dir> --by <you> --reason <what you checked>` records
+  that you read the evidence yourself, after which the run packages with
+  `integrity: attested` and can decide again.
+- Starting a **new** run with the updated tool gets the pinned plan, the ledger,
+  and the hash checks.
+
+There is nothing to migrate: the run directory is plain files, and the old ones
+stay readable. Only their authority changes.
 
 <details>
 <summary>Running from a clone instead</summary>
@@ -865,8 +903,8 @@ useless.
 
 ```bash
 uv sync --dev
-uv run pytest -q              # 201 tests (3 real-browser tests are opt-in)
-uv run holoqa selftest        # 25 guardrail checks
+uv run pytest -q              # 202 tests (3 real-browser tests are opt-in)
+uv run holoqa selftest        # 30 guardrail checks
 uv run holoqa validate examples/wolvesight.plan.yaml
 # Optional: run the three real-browser tests against an isolated session.
 $env:HOLOQA_RUN_REAL_BROWSER="1"; uv run pytest -q tests/test_e2e_browser.py

@@ -248,6 +248,16 @@ class Run:
         """
         ledger = self.ledger(adopt=adopt)
         if ledger is None:
+            # No ledger and no memory of this run: a run started by an older
+            # HoloQA, or read by a process that did not make it. If a human has
+            # read the evidence and said so, that is the strongest statement
+            # available — report it as such rather than as bare `unverified`,
+            # because `holoqa attest` exists for exactly this case.
+            if self.attestation_path.is_file():
+                return {
+                    "status": "attested",
+                    "reason": "a human reviewed this run and accepted its records",
+                }
             return {
                 "status": "unverified",
                 "reason": "this process did not create the run and cannot "
