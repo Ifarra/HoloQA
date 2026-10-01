@@ -115,19 +115,28 @@ MCP client entry:
 
 ### Updating
 
-HoloQA is installed from this repository rather than from PyPI, so there is no
-version to resolve and `uv tool upgrade holoqa` answers **"Nothing to upgrade"**.
-Re-run the install command instead — it replaces the tool in place:
-
 ```bash
-uv tool install git+https://github.com/Ifarra/HoloQA      # no --force needed
+holoqa upgrade --check     # is there a newer build?  (0 = current, 1 = update, 2 = unreachable)
+holoqa upgrade             # install it
 ```
 
-On a OneDrive- or cloud-synced checkout, add `UV_LINK_MODE=copy` (see
-Troubleshooting). Then restart your MCP client: it reads the server list at
-startup, so the new build is not picked up in the session that installed it.
+`upgrade` compares the commit uv recorded when HoloQA was installed
+(`direct_url.json`, PEP 610) against the commit on `main`, then runs the install
+for you. It downloads nothing itself — `uv` does the fetching.
 
-Confirm which build you are running:
+**Close your MCP client first.** On Windows a running client holds files inside
+the tool's environment and the update fails part-way, leaving HoloQA broken
+until it is repaired. `upgrade` detects that and prints the recovery command
+rather than leaving you to retry blindly:
+
+```bash
+uv tool install --reinstall git+https://github.com/Ifarra/HoloQA
+```
+
+`--reinstall` is not optional there: a failed attempt can leave the environment
+incomplete, and a plain retry may report success without repairing it.
+
+Then restart the client and confirm the build:
 
 ```bash
 holoqa selftest        # the count is the version marker
@@ -135,6 +144,24 @@ holoqa selftest        # the count is the version marker
 
 The count changes as guardrails are added — 25 before the integrity work, 30
 after — so a `selftest` that prints 25 means the update did not take.
+
+<details>
+<summary>Doing it by hand instead</summary>
+
+`holoqa upgrade` is a thin wrapper around this. Useful when uv is not on the
+PATH HoloQA sees, or when you want to pin a specific commit:
+
+```bash
+uv tool install git+https://github.com/Ifarra/HoloQA          # latest main
+uv tool install "git+https://github.com/Ifarra/HoloQA@<sha>"  # a specific commit
+```
+
+Note that `uv tool upgrade holoqa` does **not** work: HoloQA is installed from a
+git ref rather than a versioned index, so there is no version for uv to resolve
+and it answers **"Nothing to upgrade"**. On a OneDrive- or cloud-synced checkout,
+add `UV_LINK_MODE=copy` (see Troubleshooting).
+
+</details>
 
 **Your existing runs are not migrated, and that is deliberate.** A run created
 before this version has no `plan.pinned.yaml` and no ledger, so HoloQA cannot
@@ -595,13 +622,14 @@ HoloQA never edits a plan — plans are human-owned and reviewed.
 ## CLI
 
 ```
-holoqa [mcp|selftest|doctor|init|validate|status|verify|attest|agent]
+holoqa [mcp|selftest|doctor|init|validate|status|verify|attest|upgrade|agent]
 ```
 
 | Command | What |
 |---|---|
 | *(none)* / `mcp` | serve the MCP server over stdio |
 | `verify` | report whether a run's evidence can be trusted (exit 0 / 1 / 2) |
+| `upgrade` | update HoloQA from the repository (`--check` to only report) |
 | `attest` | record that a human reviewed a run HoloQA cannot verify |
 | `doctor` | check `agent-browser`, print the MCP client entry |
 | `init` | scaffold `holoqa.plan.yaml` (`--app`, `--url`, `-o`) |
@@ -903,7 +931,7 @@ useless.
 
 ```bash
 uv sync --dev
-uv run pytest -q              # 202 tests (3 real-browser tests are opt-in)
+uv run pytest -q              # 215 tests (3 real-browser tests are opt-in)
 uv run holoqa selftest        # 30 guardrail checks
 uv run holoqa validate examples/wolvesight.plan.yaml
 # Optional: run the three real-browser tests against an isolated session.

@@ -16,6 +16,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import urlopen
 
 from holoqa import BLOCKED, FAIL, PASS, __version__
 from holoqa import plan as plan_module
@@ -522,6 +524,143 @@ def init(app: str, url: str, output: str) -> int:
     return 0
 
 
+#: Where `holoqa upgrade` fetches from. A git ref, not an index: there is no
+#: `holoqa` on PyPI, which is also why `uv tool upgrade holoqa` answers "Nothing
+#: to upgrade" — there is no version for it to resolve.
+UPGRADE_SOURCE = "git+https://github.com/Ifarra/HoloQA"
+UPGRADE_REPO = "https://github.com/Ifarra/HoloQA"
+
+
+def installed_commit() -> str:
+    """The commit uv recorded when it installed this tool, or ``""``.
+
+    PEP 610 says a direct-URL install writes ``direct_url.json`` beside the
+    metadata, and uv does. That file is the only way to know which build is
+    actually installed, because the package version is a static string.
+    """
+    try:
+        from importlib.metadata import distribution
+
+        raw = distribution("holoqa").read_text("direct_url.json")
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    try:
+        return str(json.loads(raw).get("vcs_info", {}).get("commit_id", ""))
+    except ValueError:
+        return ""
+
+
+def remote_commit(timeout: int = 30) -> tuple[str, str]:
+    """The current commit on main, as ``(sha, how)``. Empty sha means unknown.
+
+    Uses ``git ls-remote`` when git is present — no rate limit — and falls back
+    to the GitHub API so a machine without git can still check.
+    """
+    git = shutil.which("git")
+    if git:
+        try:
+            done = subprocess.run(
+                [git, "ls-remote", UPGRADE_REPO, "refs/heads/main"],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if done.returncode == 0 and done.stdout.strip():
+                return done.stdout.split()[0], "git ls-remote"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        with urlopen(
+            "https://api.github.com/repos/Ifarra/HoloQA/commits/main",
+            timeout=timeout,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return str(payload.get("sha", "")), "GitHub API"
+    except (URLError, OSError, ValueError):
+        return "", "unreachable"
+
+
+def _run_upgrade(source: str, reinstall: bool) -> tuple[bool, str]:
+    uv = shutil.which("uv")
+    if not uv:
+        return False, (
+            "uv is not on PATH. HoloQA is installed as a uv tool, so updating it "
+            "needs uv: https://docs.astral.sh/uv/getting-started/installation/"
+        )
+    command = [uv, "tool", "install"]
+    if reinstall:
+        command.append("--reinstall")
+    command.append(source)
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=900)
+    except subprocess.SubprocessError as error:
+        return False, f"uv failed: {error}"
+    output = (done.stdout or "") + (done.stderr or "")
+    return done.returncode == 0, output.strip()
+
+
+def upgrade(*, check_only: bool = False, source: str = UPGRADE_SOURCE) -> int:
+    """Update the installed HoloQA from the repository, or report whether one exists."""
+    current = installed_commit()
+    print(f"installed        {current[:12] or 'unknown (not installed as a uv tool)'}")
+    latest, how = remote_commit()
+    if not latest:
+        print("latest           unreachable - check your network, then retry")
+        return 2
+    print(f"latest (main)    {latest[:12]}  (via {how})")
+
+    if current and current == latest:
+        print("")
+        print("Already up to date.")
+        return 0
+    if not current:
+        print("")
+        print(
+            "This install has no recorded commit - it was not installed from git, "
+            "or was installed by something other than uv. Re-run the install "
+            "command to adopt the tracked form."
+        )
+    if check_only:
+        print("")
+        print("An update is available. Run `holoqa upgrade` to install it.")
+        return 1
+
+    print("")
+    print(f"Installing {source} ...")
+    ok, output = _run_upgrade(source, reinstall=False)
+    if not ok:
+        # On Windows a running MCP server holds files inside the tool's venv, and
+        # uv fails with "failed to remove directory ... (os error 145)" part-way
+        # through, which leaves the venv incomplete: the next `holoqa` call dies
+        # with a ModuleNotFoundError. `--reinstall` repairs it once the holder is
+        # gone, so the failure path is a recover, not a retry-in-the-dark.
+        print("The first attempt failed:")
+        print("  " + (output.strip().splitlines()[-1] if output.strip() else "no output"))
+        print("")
+        print(
+            "This usually means an MCP client is running HoloQA right now, and "
+            "Windows will not let the update replace files it is using."
+        )
+        print("Close your MCP client (Claude Code, Cursor, ...), then run:")
+        print(f"  uv tool install --reinstall {source}")
+        print("")
+        print(
+            "`--reinstall` matters: a failed attempt can leave the tool's "
+            "environment incomplete, and a plain retry may report success without "
+            "repairing it."
+        )
+        return 2
+
+    print(output)
+    print("")
+    print(
+        "Updated. Restart your MCP client - it reads the server list at startup, "
+        "so the new build is not picked up in the current session."
+    )
+    print("Confirm with `holoqa selftest`: the check count is the version marker.")
+    return 0
+
+
 def doctor() -> int:
     """Check that the pieces a run depends on are actually present."""
     ok = True
@@ -743,6 +882,13 @@ def main(argv: list[str] | None = None) -> int:
     validate.add_argument("plan")
     status = sub.add_parser("status", help="show the active run")
     status.add_argument("--run-dir", default="")
+    upgrade_parser = sub.add_parser(
+        "upgrade", help="update HoloQA from the repository, or check for one"
+    )
+    upgrade_parser.add_argument(
+        "--check", action="store_true",
+        help="report whether an update exists without installing it",
+    )
     verify = sub.add_parser(
         "verify", help="report whether a run's evidence can be trusted"
     )
@@ -851,6 +997,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(json.dumps(run.status(plan), indent=2))
         return 0
+    if args.command == "upgrade":
+        try:
+            return upgrade(check_only=args.check)
+        except KeyboardInterrupt:
+            return 130
     if args.command == "verify":
         try:
             run = run_module.find(args.run_dir or None)
