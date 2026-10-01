@@ -954,9 +954,14 @@ useless.
 - **`sse` and `download` captures are unit-tested only.** The browser
   end-to-end suite covers `screenshot`, `dom`, and `api` against a real server.
   The other two need a real app with a stream and a blob export.
-- **No file-content assertions.** You can require a download exists, but not
-  that a PDF has non-empty pages. Steps like that need a human to read the
-  evidence; mark them clearly in the plan.
+- **Websocket frames cannot be captured yet.** `observe` supports `screenshot`,
+  `dom`, `api`, `sse` and `download`. A step whose evidence is a pushed socket
+  frame has to block with a cause. `docs/SETUP-TIER2.md` designs the capture;
+  it is not built.
+- **Download contents can be asserted, page contents cannot be rendered.** A
+  `file:` assertion checks a downloaded file's name, size, magic bytes and text
+  contents, so an exported CSV can be proven non-empty and correct. A PDF's
+  *rendered pages* are still a human's job — mark such steps `strength: weak`.
 - **Plans are per-application and hand-written.** That is a deliberate cost:
   the spec is what stops the agent grading its own homework.
 - **`text_contains` and `text_not_contains` on a truncated page return BLOCKED**,
@@ -983,7 +988,7 @@ useless.
 
 ```bash
 uv sync --dev
-uv run pytest -q              # 215 tests (3 real-browser tests are opt-in)
+uv run pytest -q              # 244 tests (3 real-browser tests are opt-in)
 uv run holoqa selftest        # 30 guardrail checks
 uv run holoqa validate examples/wolvesight.plan.yaml
 # Optional: run the three real-browser tests against an isolated session.
@@ -996,14 +1001,15 @@ the offline suite stays green in CI.
 ```
 src/holoqa/
   plan.py       load, validate, interpolate bindings
-  run.py        run directory, evidence index, guardrails
+  run.py        run directory, evidence index, guardrails, ledger
   verdict.py    the assertion evaluator
   observe.py    agent-browser capture and redaction
+  workspace.py  one workspace per app: run ids, current run, retest, migrate
   report.py     markdown, packaging, ZIP
   workbook.py   optional XLSX annotation
   history.py    cross-run comparison
-  mcp.py        the ten tools
-  cli.py        init / doctor / validate / status / selftest
+  mcp.py        the MCP tools
+  cli.py        init / doctor / validate / status / runs / retest / selftest
 ```
 
 `docs/DESIGN.md` covers the architecture, what was deleted from the previous
