@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -95,21 +94,30 @@ def holoqa_run_start(
     tester: str = "",
     base_url: str = "",
     run_dir: str = "",
+    retest: bool = False,
 ) -> dict[str, Any]:
-    """Create a run directory from a plan. Ask the user for tag/commit/tester."""
+    """Create a run in the plan's workspace. Ask the user for tag/commit/tester.
+
+    The workspace names the run (``001-<stamp>``), so starting a second run of
+    the same plan — a retest — never collides with, or has to overwrite, the
+    first. Pass ``run_dir`` only to place a run somewhere explicit.
+    """
+    from holoqa import workspace as workspace_module
+
     plan = plan_module.load(plan_path)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-    directory = run_dir or f".holoqa/runs/{stamp}-{plan.meta.app}"
-    run = Run.create(
-        directory,
-        plan,
-        meta={
-            "tag": tag,
-            "commit": commit,
-            "tester": tester,
-            "base_url": base_url or plan.meta.base_url,
-        },
-    )
+    meta = {"tag": tag, "commit": commit, "tester": tester,
+            "base_url": base_url or plan.meta.base_url}
+
+    if run_dir:
+        run = Run.create(run_dir, plan, meta=meta)
+    else:
+        workspace = workspace_module.workspace_for(plan)
+        run = (
+            workspace.retest(plan, meta=meta)
+            if retest
+            else workspace.start_run(plan, meta=meta)
+        )
+
     # Apply the plan's browser options for this process before any capture.
     observe_module.set_browser_options(
         plan.meta.browser.ignore_https_errors, plan.meta.browser.args
@@ -120,6 +128,7 @@ def holoqa_run_start(
         "status": "started",
         "run_dir": str(run.dir),
         "run_id": status["run_id"],
+        "retest_of": (run.read().get("meta", {}) or {}).get("retest_of", ""),
         "steps": len(plan.step_ids),
         "first_step": status["next_step"],
         "note": (

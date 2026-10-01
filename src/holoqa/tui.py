@@ -33,6 +33,19 @@ from holoqa import plan as plan_module
 from holoqa import run as run_module
 
 
+def row_is_legacy(run_path: Path, workspace) -> bool:
+    """Is this run in the old flat layout rather than inside a workspace?
+
+    A legacy run is viewable and retestable from, but switching *to* it must not
+    try to make it a workspace's current run — it does not live there.
+    """
+    try:
+        run_path.resolve().relative_to(workspace.runs_dir.resolve())
+        return False
+    except (ValueError, OSError):
+        return True
+
+
 def _theme_config_path() -> Path:
     configured = os.environ.get("HOLOQA_TUI_CONFIG", "").strip()
     return Path(configured) if configured else Path.home() / ".holoqa" / "tui.json"
@@ -235,6 +248,8 @@ class HoloQATui(App[None]):
     #statusbar { height: 4; padding: 1 2; background: $surface; border-top: solid $panel; color: $text-muted; }
     #overlay { layer: overlay; dock: top; width: 64; height: auto; max-height: 24; margin: 5 8; padding: 1 2; background: $surface; border: round $accent; color: $text; }
     #theme-menu { layer: overlay; dock: top; width: 42; height: auto; max-height: 18; margin: 5 8; padding: 1; background: $surface; border: round $accent; color: $text; overflow-y: auto; scrollbar-size: 1 1; }
+    #session-menu { layer: overlay; dock: top; width: 80; height: auto; max-height: 20; margin: 3 6; padding: 1; background: $surface; border: round $accent; color: $text; overflow-y: auto; scrollbar-size: 1 1; }
+    #workspace-menu { layer: overlay; dock: top; width: 84; height: auto; max-height: 20; margin: 3 6; padding: 1; background: $surface; border: round $accent; color: $text; overflow-y: auto; scrollbar-size: 1 1; }
     .compact #topbar { padding: 1 1; }
     .compact #brand { width: 9; }
     .compact #shortcuts { width: 1fr; }
@@ -275,6 +290,10 @@ class HoloQATui(App[None]):
         Binding("escape", "hide_search", "Close search", priority=True),
         Binding("?", "show_help", "Help", priority=True),
         ("m", "show_run_menu", "Run menu"),
+        Binding("s", "show_sessions", "Sessions", priority=True),
+        Binding("w", "show_workspaces", "Workspaces", priority=True),
+        Binding("t", "retest", "Retest", priority=True),
+        Binding("g", "continue_run", "Continue", priority=True),
         ("shift+y", "copy_last_event", "Copy event"),
         ("q", "quit", "Quit"),
     ]
@@ -335,6 +354,20 @@ class HoloQATui(App[None]):
         self._animated_timer = None
         self._theme_menu_open = False
         self._theme_before_picker = "textual-dark"
+        # Sessions: the picker lists runs of the workspace this run belongs to.
+        self._session_menu_open = False
+        self._session_rows: list[dict[str, Any]] = []
+        self._session_index: dict[str, str] = {}
+        #: Set while an action is deciding, so the highlight event cannot
+        #: overwrite the message the action is about to show. The event can be
+        #: delivered after the action returns, so a short deadline is used
+        #: rather than a per-call flag.
+        self._session_action_pending = False
+        self._session_locked_until = 0.0
+        #: Workspace picker: choose which application's runs this console shows.
+        self._workspace_menu_open = False
+        self._workspace_rows: list[dict[str, Any]] = []
+        self.workspace = None
         # Keep the complete Textual catalog available. The picker is bounded
         # and scrollable, so adding a theme never silently removes another.
         self._theme_names = tuple(self.available_themes)
@@ -388,6 +421,8 @@ class HoloQATui(App[None]):
             yield Static("holoqa", id="version")
         yield Static(id="overlay", classes="hidden")
         yield OptionList(id="theme-menu", classes="hidden")
+        yield OptionList(id="session-menu", classes="hidden")
+        yield OptionList(id="workspace-menu", classes="hidden")
 
     def on_mount(self) -> None:
         self._set_compact_mode(self.size.width < 150 or self.size.height < 45)
@@ -1586,7 +1621,36 @@ class HoloQATui(App[None]):
             self.collapsed_groups.add(group_id)
         self._render_state()
 
+    def _move_session(self, delta: int) -> None:
+        """Move the session picker's highlight, clamped to the list."""
+        if not self._session_rows:
+            return
+        menu = self.query_one("#session-menu", OptionList)
+        current = menu.highlighted if menu.highlighted is not None else 0
+        index = max(0, min(len(self._session_rows) - 1, current + delta))
+        menu.highlighted = index
+        self._set_safety(
+            f"{self._session_rows[index]['run_id']} — Enter open · g continue · t retest · Esc close"
+        )
+
+    def _move_workspace(self, delta: int) -> None:
+        if not self._workspace_rows:
+            return
+        menu = self.query_one("#workspace-menu", OptionList)
+        current = menu.highlighted if menu.highlighted is not None else 0
+        index = max(0, min(len(self._workspace_rows) - 1, current + delta))
+        menu.highlighted = index
+        self._set_safety(
+            f"{self._workspace_rows[index]['app']} — Enter open · Esc close"
+        )
+
     def action_cursor_up(self) -> None:
+        if self._workspace_menu_open:
+            self._move_workspace(-1)
+            return
+        if self._session_menu_open:
+            self._move_session(-1)
+            return
         if self._theme_menu_open:
             self._move_theme(-1)
             return
@@ -1610,6 +1674,12 @@ class HoloQATui(App[None]):
         self._select_step(ids[max(0, index - 1)], user=True)
 
     def action_cursor_down(self) -> None:
+        if self._workspace_menu_open:
+            self._move_workspace(1)
+            return
+        if self._session_menu_open:
+            self._move_session(1)
+            return
         if self._theme_menu_open:
             self._move_theme(1)
             return
@@ -1662,6 +1732,12 @@ class HoloQATui(App[None]):
             self.action_open_artifact(self.selected_artifact_index)
 
     def action_activate_selected(self) -> None:
+        if self._workspace_menu_open:
+            self.action_open_workspace()
+            return
+        if self._session_menu_open:
+            self.action_open_session()
+            return
         if self._theme_menu_open:
             self._commit_theme_preview()
             return
@@ -1706,6 +1782,14 @@ class HoloQATui(App[None]):
         search.focus()
 
     def action_hide_search(self) -> None:
+        if self._workspace_menu_open:
+            self._close_workspace_menu()
+            self._set_safety("Workspaces closed")
+            return
+        if self._session_menu_open:
+            self._close_session_menu()
+            self._set_safety("Sessions closed")
+            return
         if self._theme_menu_open:
             self._cancel_theme_preview()
             return
@@ -1742,6 +1826,330 @@ class HoloQATui(App[None]):
         overlay.update(content)
         overlay.remove_class("hidden")
         overlay.display = True
+
+    # ----------------------------------------------------------- workspaces
+
+    def _workspace_label(self, row: dict[str, Any], current_app: str) -> str:
+        """One workspace row: app, its plan, its run count and last decision."""
+        marker = "●" if row["app"] == current_app else "○"
+        plan = Path(str(row.get("plan_path", ""))).name or "—"
+        decision = str(row.get("decision") or "—")
+        runs = row.get("runs", 0)
+        return (
+            f"{marker} {row['app']:<18} {runs:>3} run(s)  {decision:<8} {plan}"
+        )
+
+    def action_show_workspaces(self) -> None:
+        """Open the workspace picker: switch which application this console shows.
+
+        This is the plan switcher. A workspace is one application, so choosing
+        one is choosing the plan being tested — the capability the console
+        lacked entirely, since ``plan_path`` was fixed at construction.
+        """
+        from holoqa import workspace as workspace_module
+
+        if self._workspace_menu_open:
+            self._close_workspace_menu()
+            return
+        self.action_close_overlay()
+        current = self._workspace()
+
+        spaces = workspace_module.find_workspaces(start=Path(self.plan_path).parent if self.plan_path else Path.cwd())
+        if current is not None and current.exists() and all(ws.app != current.app for ws in spaces):
+            spaces.insert(0, current)
+        if not spaces:
+            self._set_safety(
+                "No workspaces found. Start a run first, or pass --plan to add one."
+            )
+            return
+
+        rows: list[dict[str, Any]] = []
+        for ws in spaces:
+            runs = ws.list_runs()
+            rows.append({
+                "app": ws.app,
+                "path": str(ws.dir),
+                "plan_path": ws.read().get("plan_path", ""),
+                "runs": len(ws.run_ids()),
+                "decision": runs[0]["decision"] if runs else "",
+            })
+        rows.sort(key=lambda item: str(item["app"]))
+        self._workspace_rows = rows
+
+        menu = self.query_one("#workspace-menu", OptionList)
+        options = []
+        for row in rows:
+            label = self._workspace_label(row, current.app if current else "")
+            options.append(Option(label, id=row["app"]))
+        menu.set_options(options)
+        try:
+            menu.highlighted = [row["app"] for row in rows].index(current.app) if current else 0
+        except ValueError:
+            menu.highlighted = 0
+        menu.remove_class("hidden")
+        menu.display = True
+        self._workspace_menu_open = True
+        menu.focus()
+        self._set_safety(
+            f"Workspaces — {len(rows)} application(s). Enter open · Esc close"
+        )
+
+    def _close_workspace_menu(self) -> None:
+        menu = self.query_one("#workspace-menu", OptionList)
+        menu.add_class("hidden")
+        menu.display = False
+        self._workspace_menu_open = False
+        self.query_one("#agent-log", RichLog).focus()
+
+    def _highlighted_workspace(self) -> dict[str, Any] | None:
+        menu = self.query_one("#workspace-menu", OptionList)
+        option = menu.get_option_at_index(menu.highlighted) if menu.highlighted is not None else None
+        app = str(option.id) if option is not None else ""
+        for row in self._workspace_rows:
+            if row["app"] == app:
+                return row
+        return None
+
+    def action_open_workspace(self) -> None:
+        """Switch the console to another application's workspace."""
+        from holoqa import workspace as workspace_module
+
+        row = self._highlighted_workspace()
+        if row is None:
+            return
+        self._close_workspace_menu()
+        workspace = workspace_module.Workspace(Path(str(row["path"])))
+        self.workspace = workspace
+
+        # Rebind the plan this console is working from, then land on whatever
+        # run the workspace points at.
+        plan_path = str(row.get("plan_path") or "")
+        if plan_path and Path(plan_path).is_file():
+            self.plan_path = Path(plan_path)
+        current_run = workspace.current_run_id()
+        if not current_run:
+            self.run_dir = ""
+            self._set_safety(
+                f"Workspace {workspace.app!r} has no runs yet; press t to retest "
+                f"from {Path(plan_path).name or 'its plan'}"
+            )
+            return
+        self._open_run(str(workspace.run_dir(current_run)), current_run)
+        self._set_safety(
+            f"Workspace {workspace.app!r} — showing {current_run}. "
+            "Press s for its runs."
+        )
+
+    # ------------------------------------------------------------- sessions
+
+    def _workspace(self):
+        """The workspace this TUI is showing, resolved lazily from its plan.
+
+        Resolution goes through the plan, never the process cwd, so the same
+        workspace is reachable from anywhere — the property the old
+        process-relative lookup lacked.
+        """
+        from holoqa import workspace as workspace_module
+
+        if self.workspace is not None and self.workspace.exists():
+            return self.workspace
+        if self.run_dir and (Path(self.run_dir) / "run.json").is_file():
+            # A run dir is <workspace>/runs/<id>; walk back up to the workspace.
+            self.workspace = workspace_module.Workspace(Path(self.run_dir).parent.parent)
+            return self.workspace
+        if self.plan_path:
+            try:
+                plan = plan_module.load(self.plan_path)
+                self.workspace = workspace_module.workspace_for(plan)
+            except (plan_module.PlanError, OSError):
+                return None
+        return self.workspace
+
+    def _session_label(self, row: dict[str, Any], current: str) -> str:
+        """One picker row: enough to choose from without opening the run."""
+        counts = row.get("counts") or {}
+        done = sum(counts.values())
+        total = row.get("total") or done
+        marker = "●" if row.get("run_id") == current else "○"
+        integrity = str(row.get("integrity", ""))
+        badge = "" if integrity == "verified" else f"  [{integrity}]"
+        retest = row.get("retest_of")
+        retest_note = f"  ← {retest}" if retest else ""
+        return (
+            f"{marker} {str(row.get('run_id','')):<22} "
+            f"{str(row.get('decision','')):<8} {done}/{total:<3} "
+            f"P{counts.get('PASS', 0)} F{counts.get('FAIL', 0)} B{counts.get('BLOCKED', 0)}"
+            f"{badge}{retest_note}"
+        )
+
+    def action_show_sessions(self) -> None:
+        """Open the run picker for this workspace."""
+        if self._session_menu_open:
+            self._close_session_menu()
+            return
+        workspace = self._workspace()
+        if workspace is None or not workspace.exists():
+            self._set_safety("No workspace for this plan yet — start a run first")
+            return
+        self.action_close_overlay()
+        rows = workspace.list_runs()
+        legacy = workspace.legacy_runs()
+        for row in legacy:
+            rows.append({**row, "run_id": row["run_id"]})
+        if not rows:
+            self._set_safety(f"Workspace {workspace.app!r} has no runs yet")
+            return
+        self._session_rows = rows
+        current = workspace.current_run_id()
+
+        menu = self.query_one("#session-menu", OptionList)
+        options = []
+        self._session_index = {}
+        for row in rows:
+            label = self._session_label(row, current)
+            options.append(Option(label, id=row["run_id"]))
+            self._session_index[row["run_id"]] = str(row.get("path") or workspace.run_dir(row["run_id"]))
+        menu.set_options(options)
+        try:
+            menu.highlighted = [row["run_id"] for row in rows].index(current)
+        except ValueError:
+            menu.highlighted = 0
+        menu.remove_class("hidden")
+        menu.display = True
+        self._session_menu_open = True
+        menu.focus()
+        # No live preview here, deliberately: a row is a whole run directory and
+        # re-reading one on every arrow key would be slow and pointless. The row
+        # carries decision, counts, age and integrity so the text is enough.
+        self._set_safety(
+            f"Sessions — {len(rows)} run(s) in {workspace.app!r}. "
+            "Enter open · t retest · d delete · Esc close"
+        )
+
+    def _close_session_menu(self) -> None:
+        menu = self.query_one("#session-menu", OptionList)
+        menu.add_class("hidden")
+        menu.display = False
+        self._session_menu_open = False
+        self.query_one("#agent-log", RichLog).focus()
+
+    def _highlighted_session(self) -> dict[str, Any] | None:
+        """The highlighted row, resolved by run id rather than by position.
+
+        Reading the index would be fragile: `_session_rows` is what the picker
+        was built from, and a stale index would open the wrong run — the exact
+        failure this whole feature exists to prevent.
+        """
+        menu = self.query_one("#session-menu", OptionList)
+        option = menu.get_option_at_index(menu.highlighted) if menu.highlighted is not None else None
+        run_id = str(option.id) if option is not None else ""
+        for row in self._session_rows:
+            if row.get("run_id") == run_id:
+                return row
+        return self._session_rows[menu.highlighted] if (
+            menu.highlighted is not None and menu.highlighted < len(self._session_rows)
+        ) else None
+
+    def _session_path(self, row: dict[str, Any]) -> str:
+        """Where the run lives. The picker recorded it when it built the row.
+
+        Workspace rows do not carry a ``path`` (only legacy ones do), so reading
+        it off the row would silently open nothing — the run dir never moves, and
+        the switch would look like a no-op.
+        """
+        run_id = str(row.get("run_id", ""))
+        recorded = self._session_index.get(run_id)
+        if recorded:
+            return recorded
+        if row.get("path"):
+            return str(row["path"])
+        workspace = self._workspace()
+        return str(workspace.run_dir(run_id)) if workspace is not None else ""
+
+    def action_open_session(self) -> None:
+        """Switch the console to the highlighted run."""
+        row = self._highlighted_session()
+        if row is None:
+            return
+        self._close_session_menu()
+        self._open_run(self._session_path(row), str(row.get("run_id", "")))
+
+    def _open_run(self, path: str, run_id: str) -> None:
+        """Bind the console to another run and re-read everything from it.
+
+        This is the existing `action_refresh` path with a different directory —
+        the loading machinery already existed; only the ability to point it at a
+        different run was missing.
+        """
+        run_path = Path(path)
+        if not (run_path / "run.json").is_file():
+            self._set_safety(f"Run {run_id} is unreadable at {run_path}")
+            return
+        workspace = self._workspace()
+        if workspace is not None and not row_is_legacy(run_path, workspace):
+            try:
+                workspace.switch(run_id)
+            except run_module.GuardrailError as error:
+                self._set_safety(str(error))
+                return
+        self.run_dir = str(run_path)
+        self.state.provider = "-"
+        self.state.activity = "IDLE"
+        self.state.activity_detail = f"Viewing {run_id} (read-only unless this process captured it)"
+        self.action_refresh()
+        self._set_safety(f"Switched to {run_id}")
+
+    def action_continue_run(self) -> None:
+        """Resume the highlighted run, which requires this process to hold it."""
+        row = self._highlighted_session() if self._session_menu_open else None
+        if row is None:
+            return
+        if row.get("integrity") != "verified":
+            # The refusal must be readable, so suppress the row-hint event that
+            # setting `highlighted` can fire (it is delivered after this returns).
+            self._session_locked_until = time.monotonic() + 1.0
+            self._set_safety(
+                f"{row.get('run_id')} is {row.get('integrity')}: this process did not "
+                "capture it, so it cannot be continued here. "
+                f"Run: holoqa agent resume --run-dir {self._session_path(row)}"
+            )
+            return
+        self._close_session_menu()
+        self.resume = True
+        self._open_run(self._session_path(row), str(row.get("run_id", "")))
+        self._set_safety(f"Continuing {row.get('run_id')}")
+
+    def action_retest(self) -> None:
+        """Start a NEW run from the same plan, keeping the old one.
+
+        This is the operation the flat layout made impossible: retesting used to
+        mean deleting the failing run, destroying the baseline a fix is measured
+        against.
+        """
+        workspace = self._workspace()
+        if workspace is None or self.plan_path is None:
+            self._set_safety("Retest needs a plan; reopen with --plan")
+            return
+        if self._session_menu_open:
+            self._close_session_menu()
+        try:
+            plan = plan_module.load(self.plan_path)
+            run = workspace.retest(plan, meta={
+                "tag": self.tag, "commit": self.commit, "tester": self.tester,
+                "base_url": self.base_url or plan.meta.base_url,
+            })
+        except (plan_module.PlanError, run_module.GuardrailError, OSError) as error:
+            self._set_safety(f"Retest failed: {error}")
+            return
+        self.run_dir = str(run.dir)
+        self.state.run_id = run.read()["run_id"]
+        self._set_safety(
+            f"Retest started as {self.state.run_id}; the previous run is kept"
+        )
+        if self.request is not None:
+            self._start_agent()
+        else:
+            self.action_refresh()
 
     def action_show_theme_menu(self) -> None:
         """Open a keyboard-first theme picker with live preview."""
@@ -1796,6 +2204,36 @@ class HoloQATui(App[None]):
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if self._theme_menu_open and event.option.id:
             self._preview_theme(str(event.option.id))
+            return
+        if self._workspace_menu_open and event.option.id:
+            # A workspace row is a directory of runs; re-reading it per arrow key
+            # would be slow and tell the user nothing the row does not already say.
+            self._set_safety(f"{event.option.id} — Enter open · Esc close")
+            return
+        if self._session_menu_open and event.option.id and not self._session_action_pending:
+            # No live preview: a session row is a whole run directory, and
+            # re-reading one per arrow key would be slow and would tell the user
+            # nothing the row does not already say.
+            #
+            # `_session_action_pending` matters: setting `highlighted` in code
+            # (a switch, a test) fires this event too, and without the guard the
+            # row hint would overwrite a refusal the user needs to read. The
+            # event can arrive *after* the action that moved the highlight
+            # returns, so the flag stays set briefly rather than for one call.
+            self._session_action_pending = False
+            if time.monotonic() < self._session_locked_until:
+                return
+            self._set_safety(
+                f"{event.option.id} selected — Enter open · g continue · t retest · Esc close"
+            )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Enter inside a picker. A run row opens that run, a workspace row that app."""
+        if self._workspace_menu_open:
+            self.action_open_workspace()
+            return
+        if self._session_menu_open:
+            self.action_open_session()
 
     def action_show_help(self) -> None:
         content = Text()
@@ -1805,6 +2243,8 @@ class HoloQATui(App[None]):
             "1 details   2 evidence   3 assertions\n"
             "p pause output   v filter   / search   Shift+Y copy event\n"
             "y copy full log   c cancel   r refresh   m run menu\n"
+            "s sessions (switch runs)   t retest   g continue\n"
+            "w workspaces (switch plan)\n"
             "Click steps, artifacts, assertions, header actions, or verdict ···\n\n",
             style="#c8d3df",
         )
@@ -1814,6 +2254,9 @@ class HoloQATui(App[None]):
     def action_show_run_menu(self) -> None:
         content = Text()
         content.append("Run actions\n\n", style="bold #e8eef4")
+        self._overlay_action(content, "Workspaces — switch application/plan (w)", "show_workspaces")
+        self._overlay_action(content, "Sessions — switch runs (s)", "show_sessions")
+        self._overlay_action(content, "Retest — new run, keep this one (t)", "retest")
         self._overlay_action(content, "Open run directory", "open_run_dir")
         self._overlay_action(content, "Copy run summary", "copy_run_summary")
         self._overlay_action(content, "Open report", "open_report")

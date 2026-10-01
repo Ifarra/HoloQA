@@ -532,6 +532,27 @@ class Run:
                 baseline=existing - {path.name},
             )
             _LEDGERS[str(self.dir)] = ledger
+        elif ledger.adopted and not ledger.seen_files:
+            # A ledger that was adopted by a *read* (an `integrity()` check, a
+            # TUI refresh, `holoqa verify`) carries `adopted=True` and would
+            # keep the run `unverified` for the rest of its life — even though
+            # this process is now demonstrably the one producing the bytes.
+            #
+            # Capturing is what takes ownership. Any record that was already in
+            # the index when we adopted it stays in the baseline (we did not
+            # make it), but the ledger stops claiming to be adopted, because it
+            # now has a first-hand capture to vouch for.
+            #
+            # Without this, merely *looking* at a fresh run before capturing in
+            # it — which the workspace picker does on every row — permanently
+            # marked it untrusted.
+            ledger.baseline = set(ledger.baseline) | {
+                item["file"]
+                for step in data["steps"].values()
+                for item in step.get("observations", [])
+                if item["file"] != path.name
+            }
+            ledger.adopted = False
         ledger.seen_files.add(path.name)
         self._write(data)
         return record
@@ -718,7 +739,18 @@ def decision(counts: dict[str, int]) -> str:
 
 
 def find(directory: str | Path | None = None) -> Run:
-    """Resolve the active run: an explicit path, ``$HOLOQA_RUN_DIR``, or latest."""
+    """Resolve the active run: an explicit path, ``$HOLOQA_RUN_DIR``, or the current one.
+
+    Workspace-aware. The order is:
+
+    1. an explicit directory;
+    2. ``$HOLOQA_RUN_DIR``;
+    3. the **current run of the workspace** the process is standing in — the
+       pointer a user set by switching, which is what makes "the run I am in"
+       real rather than "whatever is newest";
+    4. a legacy flat ``.holoqa/runs/``, newest first, so an old checkout keeps
+       working without being migrated.
+    """
     import os
 
     if directory:
@@ -726,6 +758,18 @@ def find(directory: str | Path | None = None) -> Run:
     env = os.environ.get("HOLOQA_RUN_DIR")
     if env:
         return Run(env)
+
+    # Imported here rather than at module scope: workspace imports this module.
+    from holoqa import workspace as workspace_module
+
+    for ws in workspace_module.find_workspaces(start=Path.cwd()):
+        current = ws.current_run_id()
+        if current:
+            return Run(ws.run_dir(current))
+        ids = ws.run_ids()
+        if ids:
+            return Run(ws.run_dir(ids[-1]))
+
     root = Path(".holoqa/runs").resolve()
     if root.is_dir():
         candidates = sorted(

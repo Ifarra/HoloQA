@@ -783,6 +783,145 @@ def agent_command(args: argparse.Namespace) -> int:
         return 2
 
 
+def _runs_table(rows: list[dict[str, Any]]) -> str:
+    """A fixed-width table a terminal can read at a glance."""
+    header = f"{'':2} {'run':22} {'decision':8} {'pass':>4} {'fail':>4} {'block':>5} {'left':>4}  {'integrity':11} app"
+    lines = [header, "-" * len(header)]
+    for row in rows:
+        counts = row.get("counts") or {}
+        marker = "*" if row.get("current") else " "
+        lines.append(
+            f"{marker:2} {str(row.get('run_id','')):22} "
+            f"{str(row.get('decision','')):8} "
+            f"{counts.get('PASS', 0):>4} {counts.get('FAIL', 0):>4} "
+            f"{counts.get('BLOCKED', 0):>5} {row.get('pending', 0):>4}  "
+            f"{str(row.get('integrity','')):11} {row.get('app', '')}"
+            + ("  (legacy)" if row.get("legacy") else "")
+        )
+    lines.append("")
+    lines.append("* = current run (what `holoqa status` resolves to)")
+    return "\n".join(lines)
+
+
+def runs_command(args: argparse.Namespace) -> int:
+    """List runs. Read-only: never adopts a ledger, never decides anything."""
+    from holoqa import workspace as workspace_module
+
+    try:
+        if args.plan:
+            plan = plan_module.load(args.plan)
+            spaces = [workspace_module.workspace_for(plan)]
+        else:
+            spaces = workspace_module.find_workspaces(start=Path.cwd())
+        if args.app:
+            spaces = [ws for ws in spaces if ws.app == args.app]
+        if not spaces:
+            print("no workspaces yet; start a run to create one", file=sys.stderr)
+            return 0
+    except (plan_module.PlanError, OSError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    rows: list[dict[str, Any]] = []
+    for ws in spaces:
+        current = ws.current_run_id()
+        for row in ws.list_runs():
+            rows.append({**row, "app": ws.app, "current": row["run_id"] == current})
+        if args.all:
+            rows.extend({**row, "app": ws.app, "current": False} for row in ws.legacy_runs())
+
+    rows.sort(key=lambda item: str(item.get("run_id", "")), reverse=True)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        print(_runs_table(rows))
+    return 0
+
+
+def workspaces_command(args: argparse.Namespace) -> int:
+    from holoqa import workspace as workspace_module
+
+    spaces = workspace_module.find_workspaces(start=Path.cwd())
+    payload = [
+        {
+            "app": ws.app,
+            "path": str(ws.dir),
+            "plan_path": ws.read().get("plan_path", ""),
+            "current_run": ws.current_run_id(),
+            "runs": len(ws.run_ids()),
+        }
+        for ws in spaces
+    ]
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    elif not payload:
+        print("no workspaces yet; start a run to create one")
+    else:
+        for item in payload:
+            print(f"{item['app']:20} {item['runs']:>3} run(s)  current={item['current_run'] or '—'}  {item['path']}")
+    return 0
+
+
+def retest_command(args: argparse.Namespace) -> int:
+    """Start a new run from the same plan. The previous run is never touched."""
+    from holoqa import workspace as workspace_module
+
+    try:
+        plan = plan_module.load(args.plan)
+        ws = workspace_module.workspace_for(plan)
+    except (plan_module.PlanError, OSError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    previous = ws.current_run_id()
+    if args.dry_run:
+        print(json.dumps({
+            "status": "dry_run",
+            "workspace": str(ws.dir),
+            "retest_of": previous,
+            "next_sequence": ws.next_sequence(),
+            "existing_runs": ws.run_ids(),
+            "note": "the previous run is kept; a retest appends a new one",
+        }, indent=2))
+        return 0
+
+    try:
+        run = ws.retest(plan, meta={
+            "tag": args.tag, "commit": args.commit, "tester": args.tester,
+            "base_url": args.base_url or plan.meta.base_url,
+        })
+    except GuardrailError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "status": "started",
+        "run_id": run.read()["run_id"],
+        "run_dir": str(run.dir),
+        "retest_of": previous,
+        "kept": ws.run_ids()[:-1],
+    }, indent=2))
+    return 0
+
+
+def workspace_command(args: argparse.Namespace) -> int:
+    from holoqa import workspace as workspace_module
+
+    if args.workspace_command != "migrate":
+        print(f"unknown workspace command: {args.workspace_command}", file=sys.stderr)
+        return 2
+    try:
+        plan = plan_module.load(args.plan)
+        ws = workspace_module.workspace_for(plan)
+        result = workspace_module.migrate(ws, dry_run=args.dry_run)
+    except (plan_module.PlanError, OSError, GuardrailError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2))
+    if result["status"] == "dry_run":
+        print("re-run without --dry-run to perform these moves", file=sys.stderr)
+    return 0
+
+
 def _tui_mode(mode: str, sandbox: bool) -> str:
     return mode or ("unattended" if sandbox else "supervised")
 
@@ -882,6 +1021,38 @@ def main(argv: list[str] | None = None) -> int:
     validate.add_argument("plan")
     status = sub.add_parser("status", help="show the active run")
     status.add_argument("--run-dir", default="")
+    runs = sub.add_parser("runs", help="list runs in a workspace, newest first")
+    runs.add_argument("--app", default="", help="workspace name (default: all)")
+    runs.add_argument("--plan", default="", help="resolve the workspace from this plan")
+    runs.add_argument("--json", action="store_true", help="emit the same rows as JSON")
+    runs.add_argument(
+        "--all", action="store_true",
+        help="include legacy runs from the old flat .holoqa/runs layout",
+    )
+    workspaces = sub.add_parser("workspaces", help="list every workspace")
+    workspaces.add_argument("--json", action="store_true")
+    retest = sub.add_parser(
+        "retest", help="start a new run from the same plan, keeping the old one"
+    )
+    retest.add_argument("--plan", required=True)
+    retest.add_argument("--tag", default="")
+    retest.add_argument("--commit", default="")
+    retest.add_argument("--tester", default="")
+    retest.add_argument("--base-url", default="")
+    retest.add_argument(
+        "--dry-run", action="store_true", help="say what would be created, then stop"
+    )
+    workspace_parser = sub.add_parser(
+        "workspace", help="manage workspaces (migrate an old layout)"
+    )
+    workspace_sub = workspace_parser.add_subparsers(dest="workspace_command", required=True)
+    ws_migrate = workspace_sub.add_parser(
+        "migrate", help="move legacy runs into the workspace layout"
+    )
+    ws_migrate.add_argument("--plan", required=True)
+    ws_migrate.add_argument(
+        "--dry-run", action="store_true", help="print the moves without performing them"
+    )
     upgrade_parser = sub.add_parser(
         "upgrade", help="update HoloQA from the repository, or check for one"
     )
@@ -997,6 +1168,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(json.dumps(run.status(plan), indent=2))
         return 0
+    if args.command == "runs":
+        return runs_command(args)
+    if args.command == "workspaces":
+        return workspaces_command(args)
+    if args.command == "retest":
+        return retest_command(args)
+    if args.command == "workspace":
+        return workspace_command(args)
     if args.command == "upgrade":
         try:
             return upgrade(check_only=args.check)

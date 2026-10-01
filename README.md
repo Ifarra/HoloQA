@@ -785,28 +785,80 @@ Rule 5 exists because a release checklist is used to hold back a release, so
 
 ## Run directory
 
+One workspace per application, and every run of it inside:
+
 ```
 .holoqa/
-  runs/20260918-1430-shop/
-    run.json        verdicts, notes, evidence index with SHA-256, revisions
-    plan.pinned.yaml  the plan as it was when this run started
-    attestation.json  present only if a human accepted an unverified run
-    vars.json       captured bindings: {"order_id": "ord_88"}
-    evidence/
-      step-a1-screenshot.png
-      step-a2-api-orders.json
-    out/
-      report.md
-      integrity.json            how far this run's evidence can be trusted
-      checklist.xlsx            if meta.workbook is set
-      20260918-1430-shop.zip    the deliverable
-  history.jsonl     one line per completed run
+  workspaces/
+    shop/
+      workspace.json          the index: plan, current run, run list
+      runs/
+        001-20260918-1430/    run #1 — kept, even after it failed
+          run.json              verdicts, notes, evidence index with SHA-256
+          plan.pinned.yaml      the plan as it was when this run started
+          attestation.json      present only if a human accepted a run
+          vars.json             captured bindings: {"order_id": "ord_88"}
+          evidence/
+            step-a1-screenshot.png
+            step-a2-api-orders.json
+          out/
+            report.md
+            integrity.json      how far this run's evidence can be trusted
+            001-20260918-1430.zip   the deliverable
+        002-20260918-1512/    a retest — a NEW run, never an overwrite
+      .trash/                 deleted runs, moved here rather than unlinked
+  history.jsonl               one line per completed run
 ```
 
 Plain files. Inspect with `cat`, diff in git, no database, no migrations.
 
+### Why runs are numbered instead of timestamped
+
+A run used to *be* a directory named `<stamp>-<app>`, and HoloQA refused to reuse
+a name. Two consequences, both bad:
+
+* two runs in the same minute **collided**, and the second was refused;
+* fixing a bug and retesting meant **deleting the failing run** — destroying the
+  evidence that the fix was needed.
+
+So the workspace now **allocates** a run id (`001`, `002`, …) and derives the
+folder from it. A retest appends; nothing is overwritten and nothing has to be
+deleted. A failing run is a record, not garbage — it is the baseline the next run
+is compared against.
+
+`workspace.json` holds a `current_run` pointer, so "the run I am in" is what you
+switched to, not merely the newest.
+
+```bash
+holoqa runs                    # every run in this workspace, newest first
+holoqa runs --all              # include runs from the old flat layout
+holoqa runs --json             # the same rows, machine-readable
+holoqa workspaces              # every workspace, with its current run
+holoqa retest --plan shop.plan.yaml   # new run; the previous one is kept
+holoqa workspace migrate --plan shop.plan.yaml --dry-run   # old layout, opt-in
+```
+
+Runs in the old `.holoqa/runs/` layout stay readable and retestable; nothing is
+moved unless you run `workspace migrate`, which prints its plan first.
+
 `history.jsonl` is what `holoqa_run_compare` reads to answer *what regressed
 since the last green run* — plus flaky-step detection once a few runs exist.
+
+### Switching runs in the TUI
+
+Press `s` for the session picker: every run of the workspace, with its decision,
+counts, age and evidence integrity. `Enter` opens one (`View`), `g` continues the
+one **this process** is driving, `t` retests, `Esc` closes.
+
+Press `w` for the **workspace picker** — one row per application, each with its
+run count, last decision and plan file. Selecting one switches both the runs
+*and* the plan, which is what makes a single console able to own more than one
+application.
+
+Switching to an older run is read-only by design — a process that did not capture
+a run cannot vouch for it, so it reports `unverified` rather than pretending
+otherwise. The picker shows that state instead of hiding it.
+
 
 ### XLSX annotation
 
