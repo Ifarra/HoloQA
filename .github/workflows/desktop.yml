@@ -28,6 +28,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Release promotion checks run.head_sha, so build that exact commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-node@v4
         with:
