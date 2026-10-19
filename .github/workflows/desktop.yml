@@ -1,7 +1,7 @@
 name: Windows desktop
 concurrency:
-  group: desktop-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+  group: desktop-${{ inputs.publish_existing && format('publish-{0}', inputs.release_tag) || startsWith(github.ref, 'refs/tags/desktop-v') && format('publish-{0}', github.ref_name) || format('ci-{0}', github.head_ref || github.ref_name) }}
+  cancel-in-progress: ${{ !inputs.publish_existing && !startsWith(github.ref, 'refs/tags/desktop-v') }}
 on:
   workflow_dispatch:
     inputs:
