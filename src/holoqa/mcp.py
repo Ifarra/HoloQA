@@ -17,6 +17,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
+from holoqa import browser as browser_module
 from holoqa import BLOCKED, __version__
 from holoqa import history as history_module
 from holoqa import observe as observe_module
@@ -35,7 +36,7 @@ server = MCPServer(
     ),
     instructions=(
         "Workflow: validate a plan, start a run, then for each step drive the UI "
-        "with agent-browser yourself, call holoqa_observe to capture evidence, and "
+        "with holoqa_browser (owned sessions and resource limits), call holoqa_observe to capture evidence, and "
         "call holoqa_judge. You cannot record a passing verdict — HoloQA derives it "
         "from what it captured. Use holoqa_block only for a genuine prerequisite or "
         "safety stop, never for a recoverable popup or a selector you have not "
@@ -104,6 +105,8 @@ def holoqa_run_start(
     """
     from holoqa import workspace as workspace_module
 
+    if os.environ.get("HOLOQA_MANAGED_BROWSER") != "1":
+        _cleanup_managed_runs()
     plan = plan_module.load(plan_path)
     meta = {"tag": tag, "commit": commit, "tester": tester,
             "base_url": base_url or plan.meta.base_url}
@@ -132,7 +135,7 @@ def holoqa_run_start(
         "steps": len(plan.step_ids),
         "first_step": status["next_step"],
         "note": (
-            "Drive the browser with agent-browser yourself. Call holoqa_observe to "
+            "Use holoqa_browser to drive an owned browser. Call holoqa_observe to "
             "capture evidence, then holoqa_judge. HoloQA decides PASS and FAIL."
         ),
     }
@@ -163,7 +166,59 @@ def holoqa_run_status(run_dir: str = "") -> dict[str, Any]:
             "unmet_dependencies": run.blocked_dependencies(plan, step.id),
         }
     status["actors"] = sorted(plan.meta.actors) or [plan.default_actor]
+    status["browser_sessions"] = browser_module.sessions(run)
     return status
+
+
+_MANAGED_RUNS: set[str] = set()
+
+
+def holoqa_browser(command: list[str], actor: str = "", run_dir: str = "") -> dict[str, Any]:
+    """Drive an owned browser with session/tab limits. Use this instead of shell
+    agent-browser commands in standalone MCP clients. Use ['close'] to release
+    an actor. Sessions persist until closed or the MCP server shuts down.
+    """
+    import shutil
+    import subprocess
+    from holoqa.browser_driver import execute
+    run = run_module.find(run_dir or None)
+    if os.environ.get("HOLOQA_MANAGED_BROWSER") == "1" and os.environ.get("HOLOQA_RUN_DIR") and run.dir != Path(os.environ["HOLOQA_RUN_DIR"]).resolve():
+        raise GuardrailError("Managed execution is bound to a different run; start a separate execution")
+    plan = _plan_for(run)
+    run_module._claim_writer(run.dir)
+    names = browser_module.sessions(run)
+    actor = actor or plan.default_actor
+    if actor not in names:
+        raise GuardrailError(f"Unknown or unused actor: {actor}")
+    binary = os.environ.get("HOLOQA_BROWSER_BINARY") or shutil.which("agent-browser")
+    if not binary:
+        raise observe_module.CaptureError("agent-browser is not on PATH")
+    flags = list(plan.meta.browser.args)
+    if plan.meta.browser.ignore_https_errors:
+        flags.append("--ignore-https-errors")
+    env = {**os.environ, "HOLOQA_RUN_DIR": str(run.dir),
+           "HOLOQA_BROWSER_BINARY": binary,
+           "HOLOQA_BROWSER_SESSIONS": json.dumps(names),
+           "AGENT_BROWSER_SESSION": names[actor],
+           "AGENT_BROWSER_ARGS": " ".join(flags)}
+    (run.out_dir / "browser-managed").touch()
+    _MANAGED_RUNS.add(str(run.dir))
+    try:
+        output = execute(command, env)
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        raise observe_module.CaptureError(str(error)) from error
+    return {"actor": actor, "session": names[actor], "output": output.decode("utf-8", errors="replace")}
+
+
+def _cleanup_managed_runs():
+    if os.environ.get("HOLOQA_MANAGED_BROWSER") == "1":
+        return  # The outer wrapper owns automatic continuation and cleanup.
+    for directory in list(_MANAGED_RUNS):
+        try:
+            if not browser_module.cleanup(Run(directory)):
+                _MANAGED_RUNS.discard(directory)
+        except (OSError, ValueError):
+            pass
 
 
 def _parse_headers(raw: str) -> dict[str, str]:
@@ -203,6 +258,28 @@ def _actor_session(plan: plan_module.Plan, step_id: str, requested: str) -> str:
         f"{requested!r}. The plan decides the identity."
     )
 
+
+def _capture_context(function):
+    import functools
+    import inspect
+    from holoqa.storage import file_lock
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        bound = inspect.signature(function).bind(*args, **kwargs)
+        directory = bound.arguments.get("run_dir", "")
+        run = run_module.find(directory or None)
+        if os.environ.get("HOLOQA_MANAGED_BROWSER") == "1" and os.environ.get("HOLOQA_RUN_DIR") and run.dir != Path(os.environ["HOLOQA_RUN_DIR"]).resolve():
+            raise GuardrailError("Managed execution is bound to a different run; start a separate execution")
+        token = observe_module._CAPTURE_RUN.set(run.dir)
+        try:
+            with file_lock(run.dir / ".capture.lock"):
+                return function(*args, **kwargs)
+        finally:
+            observe_module._CAPTURE_RUN.reset(token)
+    return wrapped
+
+
+@_capture_context
 
 def holoqa_observe(
     step_id: str,
@@ -249,6 +326,7 @@ def holoqa_observe(
         raise GuardrailError(f"step {step_id} is not in this plan")
 
     session = _actor_session(plan, step_id, actor)
+
 
     if wait_for:
         observe_module.wait_for(wait_for, session=session, timeout_ms=timeout_ms)
@@ -354,7 +432,12 @@ def holoqa_judge(step_id: str, run_dir: str = "") -> dict[str, Any]:
 
     run.set_verdict(step_id, outcome, note=note, assertions=results, by="holoqa")
     status = run.status(plan)
-    return {
+    cleanup_errors = []
+    if not status["pending"] and str(run.dir) in _MANAGED_RUNS and os.environ.get("HOLOQA_MANAGED_BROWSER") != "1":
+        cleanup_errors = browser_module.cleanup(run)
+        if not cleanup_errors:
+            _MANAGED_RUNS.discard(str(run.dir))
+    return {"browser_cleanup_errors": cleanup_errors,
         "step": step_id,
         "verdict": outcome,
         "assertions": results,
@@ -515,6 +598,8 @@ def _reporting_errors(function: Any) -> Any:
             return {"status": "refused", "error": "PlanError", "detail": str(error)}
         except report_module.PackageError as error:
             return {"status": "refused", "error": "PackageError", "detail": str(error)}
+        except (TimeoutError, OSError) as error:
+            return {"status": "refused", "error": type(error).__name__, "detail": str(error)}
 
     # Keep the original signature: the MCP layer derives each tool's JSON schema
     # from it, and a `*args, **kwargs` wrapper would erase every parameter.
@@ -526,6 +611,7 @@ for function, name in (
     (holoqa_plan_validate, "holoqa_plan_validate"),
     (holoqa_run_start, "holoqa_run_start"),
     (holoqa_run_status, "holoqa_run_status"),
+    (holoqa_browser, "holoqa_browser"),
     (holoqa_observe, "holoqa_observe"),
     (holoqa_judge, "holoqa_judge"),
     (holoqa_block, "holoqa_block"),
@@ -539,7 +625,11 @@ for function, name in (
 
 
 def main() -> None:
-    server.run(transport="stdio")
+    try:
+        server.run(transport="stdio")
+    finally:
+        _cleanup_managed_runs()
+        run_module._release_writers()
 
 
 if __name__ == "__main__":

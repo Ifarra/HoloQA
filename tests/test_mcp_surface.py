@@ -18,6 +18,7 @@ EXPECTED_TOOLS = {
     "holoqa_run_start",
     "holoqa_run_status",
     "holoqa_observe",
+    "holoqa_browser",
     "holoqa_judge",
     "holoqa_block",
     "holoqa_note",

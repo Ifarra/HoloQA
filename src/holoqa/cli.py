@@ -757,14 +757,11 @@ def agent_command(args: argparse.Namespace) -> int:
             return 0
         if args.agent_command == "run":
             result = agent_module.create_and_launch(
-                args.plan, request, tag=args.tag, commit=args.commit, tester=args.tester,
-                base_url=args.base_url, run_dir=args.run_dir,
+                args.plan, request, tag=args.tag, commit=args.commit,
+                tester=args.tester, base_url=args.base_url, run_dir=args.run_dir,
+                timeout_s=args.timeout, until_done=getattr(args, "until_done", False),
+                max_rounds=args.max_rounds,
             )
-            if getattr(args, "until_done", False):
-                run = run_module.find(result["holoqa"]["run_dir"])
-                result = agent_module.run_until_done(
-                    request, run, max_rounds=args.max_rounds, timeout_s=args.timeout,
-                )
         else:
             run = run_module.find(args.run_dir)
             if getattr(args, "until_done", False):

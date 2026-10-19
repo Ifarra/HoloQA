@@ -1,0 +1,131 @@
+name: Windows desktop
+concurrency:
+  group: desktop-${{ inputs.publish_existing && format('publish-{0}', inputs.release_tag) || startsWith(github.ref, 'refs/tags/desktop-v') && format('publish-{0}', github.ref_name) || format('ci-{0}', github.head_ref || github.ref_name) }}
+  cancel-in-progress: ${{ !inputs.publish_existing && !startsWith(github.ref, 'refs/tags/desktop-v') }}
+on:
+  workflow_dispatch:
+    inputs:
+      publish_existing:
+        description: Publish a previously successful Windows build without rebuilding
+        type: boolean
+        default: false
+      source_run:
+        description: Successful Windows desktop workflow run ID (existing-build publication only)
+        type: string
+      release_tag:
+        description: Existing desktop-vX.Y.Z tag matching that build (existing-build publication only)
+        type: string
+  pull_request:
+    paths: ["desktop/**", "src/holoqa/**", "tests/**", "pyproject.toml", "uv.lock", ".github/workflows/desktop.yml"]
+  push:
+    branches: [main]
+    tags: ["desktop-v*"]
+jobs:
+  windows:
+    if: inputs.publish_existing != true
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Release promotion checks run.head_sha, so build that exact commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Python dependencies
+        run: uv sync --dev --group desktop --locked
+      - name: Verify desktop versions
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || '' }}
+        shell: bash
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            uv run python desktop/scripts/version.py --check --tag "$RELEASE_TAG"
+          else
+            uv run python desktop/scripts/version.py --check
+          fi
+      - name: Engine and protocol regression tests
+        run: uv run pytest -q
+      - name: Frontend dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Build bundled engine
+        run: uv run python desktop/scripts/build_engine.py
+      - name: Browser test runtime
+        working-directory: desktop
+        run: npx playwright install chromium
+      - name: React UI with real Python engine
+        working-directory: desktop
+        run: npm run test:ui
+      - name: Packaged engine smoke
+        run: uv run python desktop/scripts/smoke_engine.py desktop/src-tauri/binaries/holoqa-desktop-engine-x86_64-pc-windows-msvc.exe
+      - name: Build Windows installer
+        working-directory: desktop
+        run: npm run desktop:build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: holoqa-windows-x64-unsigned
+          path: desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish desktop preview
+    if: >-
+      !cancelled() && ((startsWith(github.ref, 'refs/tags/desktop-v') && needs.windows.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_existing))
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify release source
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          SOURCE_RUN: ${{ inputs.source_run || github.run_id }}
+          REQUIRE_COMPLETED: ${{ inputs.publish_existing && 'true' || 'false' }}
+        run: |
+          python3 desktop/scripts/version.py --check --tag "$RELEASE_TAG"
+          python3 -c 'import os; assert os.environ["SOURCE_RUN"].isdigit(), "Invalid build run ID"'
+          TAG_COMMIT=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" > source-run.json
+          python3 desktop/scripts/verify_release_run.py --metadata source-run.json --commit "$TAG_COMMIT" --repository "$GITHUB_REPOSITORY" --completed "$REQUIRE_COMPLETED"
+          git show "$TAG_COMMIT:desktop/package.json" > source-package.json
+          git show "$TAG_COMMIT:pyproject.toml" > source-pyproject.toml
+          python3 -c 'import json,os; assert json.load(open("source-package.json"))["version"] == os.environ["RELEASE_TAG"].removeprefix("desktop-v"), "Tagged desktop version mismatch"'
+          echo "commit=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: holoqa-windows-x64-unsigned
+          path: installer
+          run-id: ${{ inputs.source_run || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Prepare checksummed release assets
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          BUILD_RUN: ${{ inputs.source_run || github.run_id }}
+        run: |
+          python3 desktop/scripts/prepare_release.py --input installer --output release --commit "$SOURCE_COMMIT" --run "$BUILD_RUN" --engine-project source-pyproject.toml
+      - name: Publish preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft > existing-release.json 2>/dev/null; then
+            python3 -c 'import json; assert json.load(open("existing-release.json"))["isDraft"], "Published releases are immutable; use a new version"'
+            gh release upload "$RELEASE_TAG" release/*.exe release/SHA256SUMS.txt release/release-manifest.json
+          else
+            gh release create "$RELEASE_TAG" release/*.exe release/SHA256SUMS.txt release/release-manifest.json --verify-tag --draft --prerelease --latest=false --title "HoloQA Desktop ${RELEASE_TAG#desktop-v} Preview" --notes-file desktop/RELEASE_NOTES.md
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false

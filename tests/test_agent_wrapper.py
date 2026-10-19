@@ -164,6 +164,10 @@ from pathlib import Path
 command = sys.argv[1]
 if command == 'screenshot':
     Path(sys.argv[2]).write_bytes(b'\\x89PNG\\r\\n\\x1a\\nfixture-image')
+elif command == 'tab':
+    print(json.dumps({'success': True, 'data': {'tabs': [{'index': 0}]}}))
+elif command == 'close':
+    print('closed')
 elif command == 'eval':
     print(json.dumps({'url': 'http://fixture.test/ready', 'title': 'fixture', 'text': 'Fixture ready', 'text_length': 13, 'truncated': False}))
 else:
@@ -195,7 +199,7 @@ def server_config():
     return {
         'command': setting('mcp_servers.holoqa.command'),
         'args': setting('mcp_servers.holoqa.args'),
-        'env': {'HOLOQA_RUN_DIR': setting('mcp_servers.holoqa.env.HOLOQA_RUN_DIR')},
+        'env': {argument.split('=', 1)[0].split('mcp_servers.holoqa.env.', 1)[1]: json.loads(argument.split('=', 1)[1]) for argument in sys.argv[1:] if argument.startswith('mcp_servers.holoqa.env.')},
     }
 
 async def main():
@@ -205,7 +209,7 @@ async def main():
     if isinstance(command, list):
         command, args = command[0], command[1:]
     run_dir = (config.get('env') or config.get('environment'))['HOLOQA_RUN_DIR']
-    params = StdioServerParameters(command=command, args=args, env={'HOLOQA_RUN_DIR': run_dir})
+    params = StdioServerParameters(command=command, args=args, env=config.get('env') or config.get('environment'))
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -232,5 +236,6 @@ print(json.dumps({'type': 'turn.completed'}))
     assert result["agent"]["provider"] == provider_name
     assert result["agent"]["state"] == "completed"
     assert result["holoqa"]["counts"]["PASS"] == 1
-    assert result["holoqa"]["decision"] == "RELEASE"
+    assert result["holoqa"]["decision"] == "HOLD"
+    assert result["holoqa"]["integrity"] == "unverified"
     assert (run_dir / "out" / "run.zip").is_file()

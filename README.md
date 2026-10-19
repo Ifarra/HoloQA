@@ -34,6 +34,15 @@ model.
 
 ---
 
+## Windows desktop preview
+
+[**Download HoloQA Desktop Preview**](https://github.com/Ifarra/HoloQA/releases) · [All releases](https://github.com/Ifarra/HoloQA/releases) · [Desktop setup](desktop/README.md)
+
+A Windows x64 workspace for local project folders, reviewed QA plans, supervised
+Codex runs, captured evidence, and pause/resume. This is an **unsigned prerelease**;
+read the release notes and setup requirements before installing. Desktop `0.1.x`
+and Python engine `2.x` use separate version lines. The engine is bundled.
+
 ## Contents
 
 - [Why](#why) · [Install](#install) · [Updating](#updating) · [Install with an AI agent](#install-with-an-ai-agent)
@@ -1015,3 +1024,65 @@ src/holoqa/
 `docs/DESIGN.md` covers the architecture, what was deleted from the previous
 server-hosted version and why, and the decisions that changed during
 implementation.
+
+### Managed browser resources
+
+`holoqa agent` assigns a stable, run-specific browser session to each actor.
+The generated agent prompt lists the exact `AGENT_BROWSER_SESSION` values to
+use for navigation; HoloQA captures use the same mapping. Reuse these sessions
+instead of opening new sessions for each step. Logical actor names in plans
+and evidence do not change.
+
+Browser sessions remain available across automatic continuation rounds. The
+wrapper closes its run's sessions after the execution finishes, stalls, reaches
+its round limit, fails, or is cancelled. A later resume therefore needs to
+reopen the application and authenticate again. Cleanup failures appear in
+`agent.json` as `browser_cleanup_errors`; they do not replace the QA verdict.
+Sessions from other runs and standalone browser sessions are not closed.
+
+Agent output uses a bounded queue (256 queued records) with backpressure.
+Cancellation and execution errors also stop the owned provider process tree
+(POSIX process groups; Windows `taskkill /T`). Browser cleanup is best effort;
+a forced host shutdown cannot execute it. Standalone MCP usage retains its
+existing actor session names and manual browser lifecycle.
+
+### Resource limits and standalone MCP navigation
+
+Use `holoqa_browser(command=["open", "https://staging.example"], actor="admin")`
+for browser navigation in a standalone MCP client, followed by `holoqa_observe`
+and `holoqa_judge`. This keeps navigation and evidence in the same run-owned
+session. `holoqa_run_status` returns the actor-to-session mapping. Use
+`command=["close"]` to release an idle actor; reopening requires authentication
+again. Standalone owned sessions are also cleaned up on completed judging,
+when starting another run, and on graceful MCP server shutdown.
+
+Managed agent runs install an ephemeral `agent-browser` PATH shim, so ordinary
+CLI navigation and MCP captures share resource accounting. These controls are
+not an OS sandbox: invoking another browser binary by absolute path bypasses
+them. Legacy standalone shell navigation keeps its manual lifecycle; use the
+managed MCP tool for limits and automatic cleanup.
+
+| Resource | Default limit | Behavior at the limit |
+|---|---|---|
+| Active browser sessions per run | 4 | Refuse another actor until an idle session is closed |
+| Tabs per session | 8 | Refuse explicit new tabs; close and report a session if page popups exceed the limit |
+| API response body | 1 MiB | Abort capture with an explicit error |
+| Intercepted export | 4 MiB | Refuse oversized exports; consume successful buffers once |
+| SSE capture | 60 seconds, 50 retained events | Count all received events, retain a bounded sample, redact captured data |
+| Browser command output | 8 MiB | Refuse oversized command output |
+| Queued agent output | 256 records, 65,536 characters per record | Apply backpressure; reject oversized records |
+| TUI history | 2,000 entries | Keep the complete transcript in the append-only log file |
+| In-process recording ledgers | 16 runs | Retired runs lose in-memory authority and require verification/attestation |
+
+Set `HOLOQA_MAX_BROWSER_SESSIONS` and `HOLOQA_MAX_BROWSER_TABS` to positive
+integers before launching HoloQA to change browser limits. Limits apply per
+run/session, not to total machine RAM. Managed navigation requires a driver
+with `tab list --json` support; an unsupported response produces an explicit
+error rather than silently disabling accounting.
+
+Concurrent executions and competing recording processes for the same run are
+refused. JSON state is replaced atomically, workspace allocation is serialized,
+and cancellation stops further continuation rounds. Status and the TUI keep
+`HOLD` for unverified evidence, matching packaging's integrity gate. Native
+Windows execution uses a suspended process assigned to a Job Object before
+resuming, so cancellation retains ownership of descendants after parent exit.

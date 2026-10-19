@@ -7,20 +7,26 @@ result. The only release decision returned here comes from the HoloQA run.
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
+from functools import wraps
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import hashlib
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from holoqa import browser as browser_module
+from holoqa.storage import atomic_json, file_lock
 from holoqa import plan as plan_module
 from holoqa import run as run_module
 
@@ -34,6 +40,7 @@ MODES = ("supervised", "unattended")
 MANIFEST_FILE = "agent.json"
 EVENTS_FILE = "agent-events.jsonl"
 PROMPT_FILE = "agent-prompt.md"
+_DEFER_BROWSER_CLEANUP: ContextVar[bool] = ContextVar("defer_browser_cleanup", default=False)
 
 
 #: What "unattended" actually means for each provider. These differ enough that
@@ -161,7 +168,10 @@ def build_launch(
         raise AgentError(f"unknown mode {request.mode!r}; use one of {', '.join(MODES)}")
 
     command = _mcp_command()
-    env = {**os.environ, "HOLOQA_RUN_DIR": str(run.dir)}
+    env = {**os.environ, "HOLOQA_RUN_DIR": str(run.dir), "HOLOQA_MANAGED_BROWSER": "1"}
+    browser_module.configure(run, directory / "browser-bin", env)
+    mcp_env = {key: value for key, value in env.items()
+               if key.startswith("HOLOQA_") or key in {"PATH", "AGENT_BROWSER_ARGS", "AGENT_BROWSER_SESSION"}}
     config_path = directory / f"{request.provider}-mcp-config.json"
 
     if request.provider == "codex":
@@ -173,10 +183,13 @@ def build_launch(
             "--config", f"mcp_servers.holoqa.args={_toml_list(command[1:])}",
             "--config", f"mcp_servers.holoqa.env.HOLOQA_RUN_DIR={_toml(str(run.dir))}",
             "--config", "mcp_servers.holoqa.required=true",
+            "--config", 'mcp_servers.holoqa.env.HOLOQA_MANAGED_BROWSER="1"',
             # `codex exec` has no human approval host. Approve only HoloQA's
             # own local tools; the sandbox remains workspace-write.
             "--config", "mcp_servers.holoqa.default_tools_approval_mode=\"approve\"",
         ]
+        for key, value in mcp_env.items():
+            args.extend(["--config", f"mcp_servers.holoqa.env.{key}={_toml(value)}"])
         if request.model:
             args.extend(["--model", request.model])
         if request.mode == "unattended":
@@ -192,7 +205,7 @@ def build_launch(
         config_path.write_text("# Codex configuration is supplied through --config.\n", encoding="utf-8")
     elif request.provider == "claude":
         config_path.write_text(json.dumps({"mcpServers": {"holoqa": {
-            "command": command[0], "args": command[1:], "env": {"HOLOQA_RUN_DIR": str(run.dir)},
+            "command": command[0], "args": command[1:], "env": mcp_env,
         }}}, indent=2), encoding="utf-8")
         # Keep the multiline prompt last. With a Windows .cmd shim, arguments
         # after a newline-bearing prompt are otherwise eaten by `cmd /c`.
@@ -222,7 +235,7 @@ def build_launch(
     else:
         config_path.write_text(json.dumps({"mcp": {"servers": {"holoqa": {
             "type": "local", "command": command, "cwd": str(request.cwd),
-            "environment": {"HOLOQA_RUN_DIR": str(run.dir)}, "codemode": False,
+            "environment": mcp_env, "codemode": False,
         }}}}, indent=2), encoding="utf-8")
         env["OPENCODE_CONFIG"] = str(config_path)
         args = ["run", "--format", "json"]
@@ -241,7 +254,7 @@ def _manifest_path(run: run_module.Run) -> Path:
 
 
 def _write_manifest(run: run_module.Run, data: dict[str, Any]) -> None:
-    _manifest_path(run).write_text(json.dumps(data, indent=2), encoding="utf-8")
+    atomic_json(_manifest_path(run), data)
 
 
 def _read_manifest(run: run_module.Run) -> dict[str, Any]:
@@ -269,6 +282,36 @@ def _emit(line: str) -> None:
             sys.stdout.write(payload.decode(encoding, errors="replace"))
 
 
+class StreamExit(int):
+    def __new__(cls, code: int, reason: str = ""):
+        result = super().__new__(cls, code)
+        result.reason = reason
+        return result
+
+
+_HELD_RUNS: ContextVar[tuple[str, ...]] = ContextVar("held_runs", default=())
+
+
+def execution_guard(function):
+    @wraps(function)
+    def guarded(request, run, *args, **kwargs):
+        key = str(run.dir)
+        if key in _HELD_RUNS.get():
+            return function(request, run, *args, **kwargs)
+        lock = file_lock(run.dir / ".execution.lock", timeout=0)
+        try:
+            lock.__enter__()
+        except TimeoutError as error:
+            raise AgentError("This run already has an active execution") from error
+        token = _HELD_RUNS.set((*_HELD_RUNS.get(), key))
+        try:
+            return function(request, run, *args, **kwargs)
+        finally:
+            _HELD_RUNS.reset(token)
+            lock.__exit__(None, None, None)
+    return guarded
+
+
 def _stream_process(
     spec: LaunchSpec,
     request: AgentRunRequest,
@@ -276,49 +319,111 @@ def _stream_process(
     *,
     deadline: float | None = None,
 ) -> int:
+    if request.cancel_event and request.cancel_event.is_set():
+        return StreamExit(130, "interrupted")
+    if deadline is not None and time.monotonic() >= deadline:
+        return StreamExit(130, "timed_out")
     process = subprocess.Popen(
         spec.command, cwd=request.cwd, env=spec.env, stdin=subprocess.DEVNULL, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1,
         # Agent CLIs emit UTF-8 JSON/events even when the Windows console uses
         # cp1252. Never let one non-console character kill the drain thread.
         encoding="utf-8", errors="replace",
+        start_new_session=os.name != "nt",
+        creationflags=0x00000004 if os.name == "nt" else 0,  # CREATE_SUSPENDED
     )
-    output: queue.Queue[tuple[str, str | None]] = queue.Queue()
+    job = None
+    if os.name == "nt":
+        from holoqa.process import WindowsJob
+        try:
+            job = WindowsJob(process._handle)
+            job.resume(process.pid)
+        except OSError:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            process.wait()
+            if job is not None:
+                job.close()
+            raise AgentError("Cannot establish Windows process-tree ownership")
+    output: queue.Queue[tuple[str, str | None]] = queue.Queue(maxsize=256)
+
+    def stop_process() -> None:
+        # The agent owns MCP children too. On POSIX the isolated process group
+        # lets cancellation stop that tree without touching the user's shell.
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        elif job is not None:
+            job.terminate()
+        if process.poll() is None:
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait()
+
+    stop_readers = threading.Event()
+
+    def enqueue(item: tuple[str, str | None]) -> None:
+        while not stop_readers.is_set():
+            try:
+                output.put(item, timeout=0.2)
+                return
+            except queue.Full:
+                continue
 
     def drain(channel: str, stream: Any) -> None:
         try:
-            for line in iter(stream.readline, ""):
-                output.put((channel, line.rstrip("\n")))
+            for line in iter(lambda: stream.readline(65537), ""):
+                if len(line) > 65536:
+                    enqueue(("error", "Agent output record exceeds 65536 characters"))
+                    break
+                enqueue((channel, line.rstrip("\n")))
+                if stop_readers.is_set():
+                    break
         finally:
-            output.put((channel, None))
+            enqueue((channel, None))
+            stream.close()
 
     readers = [threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
                threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True)]
-    for reader in readers:
-        reader.start()
-
     event_file = run.out_dir / EVENTS_FILE
-    event_handle = event_file.open("w", encoding="utf-8") if request.retain_events else None
+    event_handle = None
     open_streams = 2
     cancelled = False
     timed_out = False
     try:
-        while open_streams:
-            if request.cancel_event and request.cancel_event.is_set() and process.poll() is None:
-                process.terminate()
+        for reader in readers:
+            reader.start()
+        if request.retain_events:
+            event_handle = event_file.open("w", encoding="utf-8")
+        while open_streams or process.poll() is None:
+            if request.cancel_event and request.cancel_event.is_set():
                 cancelled = True
+                stop_process()
+                break
             # A wall-clock deadline turns a hang into a failure. Without one, an
             # agent that stalls holds a CI job open forever instead of reporting
             # an incomplete run — which is the worse of the two outcomes.
-            if deadline is not None and time.monotonic() > deadline and process.poll() is None:
-                process.terminate()
+            if deadline is not None and time.monotonic() > deadline:
                 timed_out = True
+                stop_process()
+                break
             try:
                 channel, line = output.get(timeout=0.2)
             except queue.Empty:
                 if process.poll() is not None and not any(reader.is_alive() for reader in readers):
                     break
                 continue
+            if channel == "error":
+                raise AgentError(line or "Agent output reader failed")
             if line is None:
                 open_streams -= 1
                 continue
@@ -334,23 +439,25 @@ def _stream_process(
                 event_handle.write(json.dumps({"channel": channel, "line": line}) + "\n")
                 event_handle.flush()
     except KeyboardInterrupt:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-        return 130
+        stop_process()
+        return StreamExit(130, "interrupted")
+    except BaseException:
+        stop_process()
+        raise
     finally:
+        stop_readers.set()
+        if process.poll() is None:
+            stop_process()
+        for reader in readers:
+            if reader.ident is not None:
+                reader.join(timeout=0.5)
         if event_handle:
             event_handle.close()
+        if job is not None:
+            job.close()
     if cancelled or timed_out:
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        return 130
-    return process.wait()
+        return StreamExit(130, "timed_out" if timed_out else "interrupted")
+    return StreamExit(process.wait())
 
 
 def _status(run: run_module.Run) -> dict[str, Any]:
@@ -358,6 +465,7 @@ def _status(run: run_module.Run) -> dict[str, Any]:
     return run.status(plan)
 
 
+@execution_guard
 def launch(
     request: AgentRunRequest,
     run: run_module.Run,
@@ -372,10 +480,21 @@ def launch(
         output_callback=request.output_callback,
         cancel_event=request.cancel_event,
     )
+    if timeout_s < 0:
+        raise AgentError("timeout_s must be zero or positive")
     if not request.cwd.is_dir():
         raise AgentError(f"working directory does not exist: {request.cwd}")
     plan_path = run.plan_pin
     prompt = workflow_prompt(plan_path, run.dir, resume=resume)
+    prompt += (
+        "\nBrowser sessions (actor -> AGENT_BROWSER_SESSION): "
+        + json.dumps(browser_module.sessions(run), sort_keys=True)
+        + "\nFor EVERY agent-browser command set AGENT_BROWSER_SESSION to the mapped "
+        "session for that actor. Reuse it across steps; never create extra sessions "
+        "or browsers. Keep tabs bounded and close tabs you no longer need. "
+        "HoloQA owns session cleanup. After cleanup or a resumed execution, "
+        "reopen the target and authenticate as needed.\n"
+    )
     deadline = time.monotonic() + timeout_s if timeout_s else None
     with tempfile.TemporaryDirectory(prefix="holoqa-agent-") as temp:
         spec = build_launch(request, run, prompt, Path(temp))
@@ -394,17 +513,29 @@ def launch(
             "config": f"ephemeral:{request.provider}", "started_at": run_module.now(),
         }
         _write_manifest(run, manifest)
-        code = _stream_process(spec, request, run, deadline=deadline)
+        try:
+            code = _stream_process(spec, request, run, deadline=deadline)
+        except BaseException as error:
+            manifest.update({"state": "interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
+                             "finished_at": run_module.now(), "error": type(error).__name__})
+            raise
+        finally:
+            if not _DEFER_BROWSER_CLEANUP.get():
+                manifest["browser_cleanup_errors"] = browser_module.cleanup(run)
+            _write_manifest(run, manifest)
 
     state = "interrupted" if code == 130 else ("completed" if code == 0 else "failed")
-    if code == 130 and timeout_s:
+    reason = getattr(code, "reason", "")
+    if reason:
+        state = reason
+    elif not isinstance(code, StreamExit) and code == 130 and timeout_s:
         state = "timed_out"
     manifest.update({"state": state, "exit_code": code, "finished_at": run_module.now()})
     _write_manifest(run, manifest)
     return {"agent": manifest, "holoqa": _status(run)}
 
 
-def run_until_done(
+def _run_until_done(
     request: AgentRunRequest,
     run: run_module.Run,
     *,
@@ -424,7 +555,7 @@ def run_until_done(
     """
     history: list[dict[str, Any]] = []
     result: dict[str, Any] = {}
-    judged = -1
+    judged = run.status(run.pinned_plan())["total"] - len(run.status(run.pinned_plan())["pending"])
     for round_number in range(1, max(1, max_rounds) + 1):
         result = launch(request, run, resume=resume or round_number > 1, timeout_s=timeout_s)
         status = result["holoqa"]
@@ -437,7 +568,7 @@ def run_until_done(
             "pending": len(pending),
             "decision": status.get("decision"),
         })
-        if not pending:
+        if not pending or result["agent"].get("state") in {"failed", "interrupted", "timed_out"}:
             break
         if now_judged <= judged:
             # No forward progress: another identical round cannot help.
@@ -448,21 +579,51 @@ def run_until_done(
     return result
 
 
+@execution_guard
+def run_until_done(
+    request: AgentRunRequest,
+    run: run_module.Run,
+    *,
+    max_rounds: int = 5,
+    timeout_s: int = 0,
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Retain browser state between rounds, release sessions on every exit."""
+    token = _DEFER_BROWSER_CLEANUP.set(True)
+    result: dict[str, Any] = {}
+    try:
+        result = _run_until_done(request, run, max_rounds=max_rounds,
+                                 timeout_s=timeout_s, resume=resume)
+        return result
+    finally:
+        _DEFER_BROWSER_CLEANUP.reset(token)
+        errors = browser_module.cleanup(run)
+        if result.get("agent") is not None:
+            result["agent"]["browser_cleanup_errors"] = errors
+            _write_manifest(run, result["agent"])
+
+
+def new_run_directory(plan, request) -> Path:
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+    return request.cwd.resolve() / ".holoqa" / "runs" / f"{stamp}-{plan.meta.app}-{uuid.uuid4().hex[:8]}"
+
+
 def create_and_launch(
     plan_path: str | Path,
     request: AgentRunRequest,
     *,
     tag: str = "", commit: str = "", tester: str = "", base_url: str = "", run_dir: str = "",
+    timeout_s: int = 0, until_done: bool = False, max_rounds: int = 5,
 ) -> dict[str, Any]:
     plan = plan_module.load(plan_path)
-    directory = Path(run_dir) if run_dir else request.cwd / ".holoqa" / "runs" / (
-        f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}-{plan.meta.app}"
-    )
+    directory = Path(run_dir) if run_dir else new_run_directory(plan, request)
     run = run_module.Run.create(directory, plan, meta={
         "tag": tag, "commit": commit, "tester": tester,
         "base_url": base_url or plan.meta.base_url,
     })
-    return launch(request, run)
+    if until_done:
+        return run_until_done(request, run, timeout_s=timeout_s, max_rounds=max_rounds)
+    return launch(request, run, timeout_s=timeout_s)
 
 
 def status(directory: str | Path) -> dict[str, Any]:

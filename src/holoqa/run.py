@@ -35,6 +35,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
+import atexit
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +45,7 @@ from typing import Any
 
 from holoqa import AGENT_ASSERTABLE, BLOCKED, PASS, VERDICTS
 from holoqa import plan as plan_module
+from holoqa.storage import atomic_json, file_lock
 
 RUN_FILE = "run.json"
 VARS_FILE = "vars.json"
@@ -108,7 +112,33 @@ class Ledger:
 
 #: Keyed by resolved run directory. Module-level because HoloQA serves one run
 #: at a time over stdio; a second entry appears only in tests, which is fine.
-_LEDGERS: dict[str, Ledger] = {}
+_LEDGERS: OrderedDict[str, Ledger] = OrderedDict()
+_WRITER_LOCKS: dict[str, Any] = {}
+_WRITER_GUARD = threading.RLock()
+
+
+def _install_ledger(key: str, ledger: Ledger) -> None:
+    # Eviction drops authority, never restores it from disk as verified.
+    with _WRITER_GUARD:
+        if key not in _LEDGERS and len(_LEDGERS) >= 16:
+            forget_ledger(next(iter(_LEDGERS)))
+        _LEDGERS[key] = ledger
+
+
+def _claim_writer(directory: Path) -> None:
+    key = str(directory)
+    with _WRITER_GUARD:
+        if key in _WRITER_LOCKS:
+            return
+        if len(_WRITER_LOCKS) >= 16:
+            forget_ledger(next(iter(_WRITER_LOCKS)))
+        lock = file_lock(directory / ".recording.lock", timeout=0)
+        try:
+            lock.__enter__()
+        except TimeoutError as error:
+            raise GuardrailError("Another HoloQA process owns this run's recording ledger") from error
+        _WRITER_LOCKS[key] = lock
+
 
 
 def ledger_for(directory: str | Path) -> Ledger | None:
@@ -117,7 +147,20 @@ def ledger_for(directory: str | Path) -> Ledger | None:
 
 def forget_ledger(directory: str | Path) -> None:
     """Drop a run's in-memory state. Used by tests and by explicit re-adoption."""
-    _LEDGERS.pop(str(Path(directory).expanduser().resolve()), None)
+    key = str(Path(directory).expanduser().resolve())
+    with _WRITER_GUARD:
+        _LEDGERS.pop(key, None)
+        lock = _WRITER_LOCKS.pop(key, None)
+        if lock is not None:
+            lock.__exit__(None, None, None)
+
+
+def _release_writers():
+    for directory in list(_WRITER_LOCKS):
+        forget_ledger(directory)
+
+
+atexit.register(_release_writers)
 
 
 class Run:
@@ -137,6 +180,11 @@ class Run:
         plan: plan_module.Plan,
         meta: dict[str, Any] | None = None,
     ) -> "Run":
+        with file_lock(Path(directory).expanduser().resolve() / ".create.lock"):
+            return cls._create_locked(directory, plan, meta)
+
+    @classmethod
+    def _create_locked(cls, directory, plan, meta=None):
         run = cls(directory)
         if (run.dir / RUN_FILE).exists():
             raise GuardrailError(
@@ -230,7 +278,7 @@ class Run:
         held = Ledger(
             data=data, plan=plan, adopted=True, seen_files=seen, baseline=everything
         )
-        _LEDGERS[key] = held
+        _install_ledger(key, held)
         return held
 
     # ---------------------------------------------------------- integrity
@@ -357,9 +405,7 @@ class Run:
                 "attesting needs --by and a reason of at least 10 characters: "
                 "this records that a person accepted an unverifiable run"
             )
-        self.attestation_path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        atomic_json(self.attestation_path, payload)
         return payload
 
     # ------------------------------------------------------------------- data
@@ -367,9 +413,7 @@ class Run:
     def _write(self, data: dict[str, Any]) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         target = self.dir / RUN_FILE
-        target.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        atomic_json(target, data)
         held = _LEDGERS.get(str(self.dir))
         if held is not None:
             held.data = data
@@ -441,9 +485,7 @@ class Run:
         return plan_module.load(self.plan_pin)
 
     def _write_vars(self, variables: dict[str, Any]) -> None:
-        (self.dir / VARS_FILE).write_text(
-            json.dumps(variables, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        atomic_json(self.dir / VARS_FILE, variables)
 
     def vars(self) -> dict[str, Any]:
         path = self.dir / VARS_FILE
@@ -452,9 +494,11 @@ class Run:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def bind(self, name: str, value: Any) -> None:
-        variables = self.vars()
-        variables[name] = value
-        self._write_vars(variables)
+        _claim_writer(self.dir)
+        with file_lock(self.dir / ".vars.lock"):
+            variables = self.vars()
+            variables[name] = value
+            self._write_vars(variables)
 
     def step(self, data: dict[str, Any], step_id: str) -> dict[str, Any]:
         if step_id not in data["steps"]:
@@ -483,6 +527,7 @@ class Run:
         of what makes the evidence mean something: a step that checks ownership
         is only a test if it ran as the right actor.
         """
+        _claim_writer(self.dir)
         path = Path(path)
         if not path.is_file():
             raise GuardrailError(f"evidence file does not exist: {path}")
@@ -531,7 +576,7 @@ class Run:
                 plan=self.pinned_plan(),
                 baseline=existing - {path.name},
             )
-            _LEDGERS[str(self.dir)] = ledger
+            _install_ledger(str(self.dir), ledger)
         elif ledger.adopted and not ledger.seen_files:
             # A ledger that was adopted by a *read* (an `integrity()` check, a
             # TUI refresh, `holoqa verify`) carries `adopted=True` and would
@@ -602,6 +647,7 @@ class Run:
                 f"{verdict} is derived by HoloQA from captured evidence"
             )
 
+        _claim_writer(self.dir)
         data = self.read()
         step = self.step(data, step_id)
 
@@ -660,6 +706,7 @@ class Run:
         return step
 
     def note(self, step_id: str, note: str, kb_refs: list[str] | None = None) -> dict[str, Any]:
+        _claim_writer(self.dir)
         data = self.read()
         step = self.step(data, step_id)
         if note:
@@ -695,7 +742,8 @@ class Run:
             else:
                 pending.append(step_id)
         next_step = pending[0] if pending else None
-        return {
+        integrity = self.integrity(adopt=False)
+        return {"integrity": integrity["status"],
             "run_id": data["run_id"],
             "run_dir": str(self.dir),
             "app": data.get("app", ""),
@@ -708,7 +756,7 @@ class Run:
             # An incomplete checklist is not releasable. This matters to the
             # agent wrapper: an agent that exits before judging a step must
             # never make an all-zero run look green.
-            "decision": "HOLD" if pending else decision(counts),
+            "decision": "HOLD" if pending or integrity["status"] not in {"verified", "attested"} else decision(counts),
         }
 
 
