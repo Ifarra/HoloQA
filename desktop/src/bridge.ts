@@ -23,7 +23,10 @@ export async function events(callback: (event: {event: string; data: Record<stri
   return native ? listen<{event: string; data: Record<string, unknown>}>('engine-event', e => callback(e.payload)) : () => {};
 }
 
-export interface Draft {state:string; yaml:string; error:string; summary:{app:string;target:string;checks:number;warnings:string[]}|null; attachments:{id:string;name:string;size:number;characters:number;sha256:string}[]}
+export interface PlanStep {id:string;stage:string;title:string;route?:string;do?:string;expect?:Record<string,unknown>[];requires?:Record<string,unknown>[];depends_on?:string[];actor?:string;strength?:string}
+export interface PlanSummary {app:string;target:string;checks:number;warnings:string[];stages:{id:string;title:string}[];steps:PlanStep[]}
+export interface DraftQuestion {id:string;question:string;options:string[]}
+export interface Draft {state:string; yaml:string; error:string; summary:PlanSummary|null; question:DraftQuestion|null; attachments:{id:string;name:string;size:number;characters:number;sha256:string}[]}
 export async function pickPlanFiles(kind:'documents'|'plan'):Promise<Draft|null> {
   if (!native) throw new Error('Document selection requires HoloQA Desktop.');
   return invoke<Draft|null>('pick_plan_files', {kind});

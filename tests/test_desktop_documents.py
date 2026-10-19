@@ -241,3 +241,20 @@ def test_cold_worker_never_writes_shared_bytecode(tmp_path, monkeypatch, extensi
     result=read_document(source)
     assert result['characters'] > 0
     assert not list(cache.rglob('*.pyc'))
+
+
+def test_excel_values_are_read_without_formula_or_macro_execution(tmp_path):
+    from openpyxl import Workbook
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = 'Checkout'
+    sheet.append(['Scenario', 'Expected'])
+    sheet.append(['Guest checkout', 'Order confirmation is visible'])
+    sheet['C3'] = '=1+1'
+    source = tmp_path / 'requirements.xlsx'
+    workbook.save(source)
+    result = read_document(str(source))
+    assert '## Sheet: Checkout' in result['text']
+    assert 'Guest checkout | Order confirmation is visible' in result['text']
+    # data_only=True means an uncached formula is not presented as executable text.
+    assert '=1+1' not in result['text']

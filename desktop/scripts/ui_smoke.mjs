@@ -119,6 +119,7 @@ try {
   await page.getByLabel('What should this plan cover?').fill('Test checkout with the attached acceptance criteria.');
   await page.getByRole('button',{name:'Generate plan with Codex',exact:true}).click();
   await page.getByText('Draft ready. Edit, save, then review every check.',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'View raw YAML',exact:true}).click();
   assert.match(await page.getByLabel('Plan YAML',{exact:true}).inputValue(),/Generated checkout check/);
   // Local edits survive tab navigation before save.
   await page.getByLabel('Plan YAML',{exact:true}).fill((await page.getByLabel('Plan YAML',{exact:true}).inputValue()).replace('Generated checkout check','Reviewed checkout draft'));

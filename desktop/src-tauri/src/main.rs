@@ -156,7 +156,7 @@ fn backend(state: State<'_, Backend>) -> Result<Arc<Engine>, String> { state.0.c
 
 #[tauri::command]
 async fn engine_request(state: State<'_, Backend>, method: String, params: Value) -> Result<Value, String> {
-    const METHODS: &[&str] = &["hello","project.recent_open","project.refresh","plan.load","plan.review","plan.create","plan.draft.snapshot","plan.draft.start","plan.draft.cancel","plan.draft.save","plan.attachment.remove","provider.check","run.start","run.pause","run.resume","run.stop","run.snapshot","run.history","run.export","artifact.read","approval.respond"];
+    const METHODS: &[&str] = &["hello","project.recent_open","project.refresh","plan.load","plan.review","plan.create","plan.draft.snapshot","plan.draft.start","plan.draft.cancel","plan.draft.answer","plan.draft.save","plan.attachment.remove","provider.check","run.start","run.pause","run.resume","run.stop","run.snapshot","run.history","run.export","artifact.read","approval.respond"];
     if !METHODS.contains(&method.as_str()) { return Err("Unsupported desktop method".into()); }
     let engine = backend(state)?;
     tauri::async_runtime::spawn_blocking(move || engine.request(&method, params)).await.map_err(|e|e.to_string())?
@@ -185,7 +185,7 @@ async fn pick_plan_files(app: tauri::AppHandle, state: State<'_, Backend>, kind:
             engine.request("plan.import", json!({"path":file.into_path().map_err(|e|e.to_string())?}))
         } else {
             let picked = app.dialog().file().set_title("Attach requirements documents")
-                .add_filter("Requirements documents", &["txt", "md", "markdown", "pdf", "docx"]).blocking_pick_files();
+                .add_filter("Requirements documents", &["txt", "md", "markdown", "pdf", "docx", "xlsx", "xlsm"]).blocking_pick_files();
             let Some(files) = picked else { return Ok(Value::Null) };
             if files.len() > 8 { return Err("Attach up to eight documents at a time".into()); }
             let paths: Result<Vec<_>, _> = files.into_iter().map(|file| file.into_path().map_err(|e|e.to_string())).collect();

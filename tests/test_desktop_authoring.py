@@ -29,15 +29,19 @@ for line in sys.stdin:
   assert m['params']['config']['web_search']=='disabled'
   assert m['params']['environments']==[]
   assert 'Draft a HoloQA' in m['params']['developerInstructions']
-  assert [t['name'] for t in m['params']['dynamicTools']]==['holoqa_submit_plan']
+  assert {t['name'] for t in m['params']['dynamicTools']}=={'holoqa_submit_plan','holoqa_ask_question'}
   send({'id':m['id'],'result':{'thread':{'id':'draft'}}})
  elif method=='turn/start':
   assert 'test checkout' in m['params']['input'][0]['text']
   send({'id':m['id'],'result':{'turn':{'id':'turn'}}})
-  if mode!='hang':send({'id':900,'method':'item/commandExecution/requestApproval','params':{'threadId':'draft','turnId':'turn','command':'echo injected'}})
+  if mode=='question':send({'id':902,'method':'item/tool/call','params':{'threadId':'draft','turnId':'turn','tool':'holoqa_ask_question','arguments':{'question':'Which checkout path is canonical?','options':['Cart first','Direct checkout']}}})
+  elif mode!='hang':send({'id':900,'method':'item/commandExecution/requestApproval','params':{'threadId':'draft','turnId':'turn','command':'echo injected'}})
  elif m.get('id')==900:
   assert m['result']['decision']=='decline'
   tool('steps: []' if mode=='retry' else plan)
+ elif m.get('id')==902:
+  assert m['result']['success']
+  tool(plan)
  elif m.get('id')==901:
   if mode=='retry' and not m['result']['success']:
    mode='valid';tool(plan)
@@ -91,6 +95,19 @@ def test_cancel_and_signed_out_do_not_create_a_plan(tmp_path):
     draft.start(tmp_path,'shop','http://localhost:3000','test checkout',[])
     wait_for(draft,'failed')
     assert 'Sign into Codex' in draft.error
+
+
+def test_draft_can_pause_for_a_human_decision(tmp_path):
+    draft=author(tmp_path,'question')
+    draft.start(tmp_path,'shop','http://localhost:3000','test checkout',[])
+    wait_for(draft,'generating')
+    deadline=time.monotonic()+3
+    while time.monotonic() < deadline and not draft.snapshot()['question']:
+        time.sleep(.02)
+    question=draft.snapshot()['question']
+    assert question['options']==['Cart first','Direct checkout']
+    draft.answer_question(question['id'],'Cart first')
+    wait_for(draft,'ready')
 
 
 def test_drafting_blocks_project_changes_runs_and_attachment_mutation(tmp_path):

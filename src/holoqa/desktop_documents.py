@@ -18,7 +18,7 @@ from xml.etree import ElementTree
 
 MAX_BYTES = 5 * 1024 * 1024
 MAX_TEXT = 100_000
-EXTENSIONS = {'.txt', '.md', '.markdown', '.pdf', '.docx'}
+EXTENSIONS = {'.txt', '.md', '.markdown', '.pdf', '.docx', '.xlsx', '.xlsm'}
 MAX_OUTPUT = MAX_TEXT * 6 + 8192
 EXTRACTION_TIMEOUT = 12.0
 
@@ -166,7 +166,7 @@ def extract_main(path: str) -> int:
 def _read_document(path: str) -> dict:
     candidate = Path(path)
     if candidate.suffix.lower() not in EXTENSIONS:
-        raise DocumentError('Supported documents: TXT, Markdown, PDF, and DOCX.', 'unsupported_type')
+        raise DocumentError('Supported documents: TXT, Markdown, PDF, DOCX, and XLSX.', 'unsupported_type')
     if not stat.S_ISREG(candidate.stat().st_mode):
         raise DocumentError('Attachments must be regular files.', 'invalid_type')
     with candidate.open('rb') as handle:
@@ -174,7 +174,43 @@ def _read_document(path: str) -> dict:
     if len(data) > MAX_BYTES:
         raise DocumentError('Each document must be 5 MiB or smaller.', 'source_limit')
     suffix = candidate.suffix.lower()
-    if suffix == '.pdf':
+    if suffix in {'.xlsx', '.xlsm'}:
+        # Read values only. Macros, formulas, links, images, and embedded
+        # objects are intentionally ignored. Preflight the ZIP before the
+        # workbook parser sees it to bound expansion from hostile archives.
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+            if len(entries) > 2000 or sum(max(0, e.file_size) for e in entries) > 32 * 1024 * 1024:
+                raise DocumentError('Excel workbook exceeds the extraction limits.', 'archive_limit')
+            if any(e.file_size > 8 * 1024 * 1024 for e in entries):
+                raise DocumentError('Excel workbook contains an oversized sheet.', 'archive_limit')
+        try:
+            from openpyxl import load_workbook
+            workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True,
+                                    keep_links=False, keep_vba=False)
+            rows, cells, chunks = 0, 0, []
+            for sheet in workbook.worksheets:
+                chunks.append(f'## Sheet: {sheet.title}')
+                for row in sheet.iter_rows(values_only=True):
+                    rows += 1
+                    if rows > 20_000:
+                        raise DocumentError('Excel workbooks are limited to 20,000 rows.', 'row_limit')
+                    values = []
+                    for value in row:
+                        cells += 1
+                        if cells > 200_000:
+                            raise DocumentError('Excel workbooks are limited to 200,000 cells.', 'cell_limit')
+                        values.append('' if value is None else str(value).replace('\x00', ''))
+                    line = ' | '.join(values).rstrip()
+                    if line:
+                        chunks.append(line)
+            workbook.close()
+            text = '\n'.join(chunks)
+        except DocumentError:
+            raise
+        except Exception as error:
+            raise DocumentError('Excel workbook is malformed or unsupported. Export it as .xlsx and attach again.', 'malformed') from error
+    elif suffix == '.pdf':
         from pypdf import PdfReader, overwrite_configuration
         # Bound individual compressed streams as well as file/page/text sizes.
         overwrite_configuration(
@@ -218,7 +254,7 @@ def _read_document(path: str) -> dict:
         except UnicodeDecodeError as error:
             raise DocumentError('Text attachments must use UTF-8 encoding.', 'encoding') from error
     if not text.strip():
-        raise DocumentError('No text found. Scanned PDFs and embedded images need OCR before attaching.', 'no_text')
+        raise DocumentError('No readable text found in this attachment.', 'no_text')
     if '\x00' in text:
         raise DocumentError('Binary content is not a text document.', 'binary_content')
     if len(text) > MAX_TEXT:

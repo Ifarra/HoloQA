@@ -96,8 +96,10 @@ handling; a local engine does not mean local model inference.
 
 Open a project and select **Create plan**. Enter an application name, its running
 HTTP(S) URL, and what to test. **Attach documents** accepts UTF-8 TXT/Markdown,
-text-based PDFs (up to 100 pages), and DOCX body text. Images, DOCX comments,
-headers/footers, and scanned PDFs are not interpreted; run OCR separately first.
+text-based PDFs (up to 100 pages), DOCX body text, and XLSX/XLSM workbook values.
+Images, DOCX comments, headers/footers, spreadsheet formulas/macros/images, and
+other embedded objects are not interpreted. Scanned PDFs are passed through as
+unreadable documents; no OCR is required by HoloQA.
 Limits: eight attachments, 5 MiB per file, 15 MiB combined source bytes, and
 100,000 extracted characters combined. Extraction runs in a separate process
 with runtime/output limits and can be cancelled. A rejected batch attaches no
@@ -113,7 +115,9 @@ configuration to identify MCP server names, discards configuration values, and
 stores no credentials. Drafting cannot start a QA run. Project switching and
 QA starts remain blocked until authoring finishes or is cancelled.
 
-Edit the proposed YAML and choose a filename such as `checkout.plan.yaml`.
+Review the generated plan in the visual overview, with each journey, route, and
+assertion shown as a separate card. **View raw YAML** remains available for
+advanced edits; choose a filename such as `checkout.plan.yaml`.
 **Save and review** validates the edited bytes and creates a new file in the
 project root; an existing file is never overwritten. No review token is issued.
 Read the checks on **Test plan**, approve their expected results, then start the
@@ -121,6 +125,12 @@ supervised run separately. Generating a replacement draft replaces the previous
 proposal, so save a draft you want to keep first. **Import plan file** provides
 the same editable preview/save/review flow for existing YAML, without a model
 call. Plans already discovered inside the project can still be loaded directly.
+
+During analysis, Codex can pause with a focused question when a requirement or
+repository decision is ambiguous. Choose one of the offered answers in the
+HITL panel and the same draft thread continues; cancelling the draft also
+cancels a pending question. This keeps uncertain assumptions out of the saved
+plan and gives the user the final decision before review.
 
 ## Build a Windows installer
 

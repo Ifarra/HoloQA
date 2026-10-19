@@ -507,6 +507,8 @@ class Engine:
                     "qaTools": [tool["name"] for tool in self._specs()]}
         if method == "plan.draft.cancel":
             return self.author.cancel()
+        if method == "plan.draft.answer":
+            return self.author.answer_question(params.get("id"), params.get("answer"))
         if method == "run.stop":
             return self.stop()
         if method == "approval.respond":
