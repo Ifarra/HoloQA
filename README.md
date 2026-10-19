@@ -34,6 +34,15 @@ model.
 
 ---
 
+## Windows desktop preview
+
+[**Download HoloQA Desktop v0.1.0 Preview**](https://github.com/Ifarra/HoloQA/releases/tag/desktop-v0.1.0) · [All releases](https://github.com/Ifarra/HoloQA/releases) · [Desktop setup](desktop/README.md)
+
+A Windows x64 workspace for local project folders, reviewed QA plans, supervised
+Codex runs, captured evidence, and pause/resume. This is an **unsigned prerelease**;
+read the release notes and setup requirements before installing. Desktop `0.1.x`
+and Python engine `2.x` use separate version lines. The engine is bundled.
+
 ## Contents
 
 - [Why](#why) · [Install](#install) · [Updating](#updating) · [Install with an AI agent](#install-with-an-ai-agent)

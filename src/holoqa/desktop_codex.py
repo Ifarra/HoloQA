@@ -17,6 +17,7 @@ import threading
 from typing import Any, Callable
 
 from holoqa.agent import _provider_command
+from holoqa.desktop_version import VERSION as DESKTOP_VERSION
 
 
 class ProtocolError(ValueError):
@@ -117,7 +118,7 @@ class CodexSession:
                 self.pending.pop(request_id, None)
 
     def initialize(self):
-        self.request("initialize", {"clientInfo": {"name": "holoqa_desktop", "version": "0.1.0"},
+        self.request("initialize", {"clientInfo": {"name": "holoqa_desktop", "version": DESKTOP_VERSION},
                                     "capabilities": {"experimentalApi": True}})
         self.send({"method": "initialized"})
         result = self.request("account/read", {"refreshToken": False})

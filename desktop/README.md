@@ -199,3 +199,63 @@ before enabling production use.
 
 Initial provider initialization can hold the session lock until a protocol request
 times out; immediate preflight cancellation remains follow-up work.
+
+## Versions and GitHub Releases
+
+Desktop and engine versions are independent. The Windows desktop preview is
+`0.1.0`; its bundled Python engine is `2.0.0`. Desktop tags use
+`desktop-vX.Y.Z` so they do not collide with engine releases.
+[Desktop changelog](CHANGELOG.md) records each version. Before 1.0, patch
+versions carry fixes and minor versions introduce capabilities or compatibility
+changes; document breaking changes explicitly.
+
+`desktop/package.json` is the desktop version source. Synchronize and check all
+shipped desktop metadata with:
+
+```powershell
+python desktop/scripts/version.py --set 0.1.1
+python desktop/scripts/version.py --check
+python desktop/scripts/version.py --check --tag desktop-v0.1.1
+```
+
+This updates the npm manifest/lock, Tauri config, Rust manifest/lock, and Python
+app-server client version. It leaves the Python engine version and dependency
+versions alone. Use three numeric components; preview status is a GitHub
+prerelease flag so Windows installer version comparison stays predictable.
+
+Commit the version bump and changes, let the PR tests pass, and tag the intended
+release commit:
+
+```powershell
+git tag -a desktop-v0.1.1 <release-commit> -m "HoloQA Desktop 0.1.1 Preview"
+git push origin desktop-v0.1.1
+```
+
+The tag workflow verifies that tag and metadata agree, reruns Windows engine/UI
+checks, builds/smokes the sidecar, builds the installer, and publishes a GitHub
+**prerelease** with a stable installer filename, SHA256SUMS.txt, and a manifest
+recording the exact source commit and successful build run. Publication runs
+only after the Windows job succeeds. Existing tags/assets are never silently
+replaced: fix a failed release, then use a new version if it was published.
+Preview releases do not become GitHub's latest stable release.
+
+Download previews from [GitHub Releases](https://github.com/Ifarra/HoloQA/releases).
+The installers are unsigned; check the release notes before installing. GitHub
+Actions artifacts are temporary build outputs; release assets provide the
+versioned download page. Automatic in-app updates are not enabled.
+
+The first `desktop-v0.1.0` preview uses the already-passing installer from source
+commit `72bb3de`; the release automation is added in the follow-up development
+commit. Future tags must include this workflow to publish automatically.
+
+Maintainers can also promote an already-successful Windows build with the
+workflow's `publish_existing`, `source_run`, and `release_tag` inputs. The job
+verifies repository, workflow, successful completion, exact tagged commit, and
+tagged desktop version before downloading the artifact. It records the engine
+version from that source commit, not from the workflow's newer checkout. It
+refuses to replace a published release. This supports publication of a tested
+build without recompiling it or moving its tag.
+
+Windows CI now runs once per PR update, on main pushes, and on desktop tags.
+It no longer starts duplicate push/PR builds for the desktop development branch.
+Historical failed/cancelled runs remain visible; they are not current failures.
