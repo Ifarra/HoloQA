@@ -82,6 +82,7 @@ class PlanAuthor:
         with self.lock:
             if self.active:
                 raise ValueError('Cancel plan generation before changing projects.')
+            self.generation += 1
             self.documents.clear()
             self.content = self.error = ''
             self.summary = None
@@ -122,8 +123,9 @@ class PlanAuthor:
                 error = str(exc)[:3000]
             finally:
                 with self.lock:
-                    self.state = previous
-                    self.error = '' if cancel.is_set() else error
+                    if generation == self.generation:
+                        self.state = previous
+                        self.error = '' if cancel.is_set() else error
                 self.notify()
             if error and not background and not cancel.is_set():
                 raise ValueError(error)
