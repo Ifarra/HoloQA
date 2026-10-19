@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,9 @@ REDACT_KEYS = re.compile(r"cookie|authorization|token|secret|password|set-cookie
 
 #: Default seconds to hold an SSE stream open before summarizing it.
 SSE_SECONDS = 20
+MAX_SSE_SECONDS = 60
+MAX_CAPTURE_BYTES = 8 * 1024 * 1024
+_CAPTURE_RUN: ContextVar[Path | None] = ContextVar("capture_run", default=None)
 
 
 class CaptureError(RuntimeError):
@@ -119,23 +123,43 @@ def run_cli(
     if os.name == "nt" and binary.lower().endswith((".cmd", ".bat")):
         command = ["cmd", "/c", binary, *args]
     environment = dict(os.environ)
+    environment["HOLOQA_BROWSER_TIMEOUT"] = str(timeout)
+    current_run = _CAPTURE_RUN.get()
+    managed_standalone = current_run is not None and (current_run / "out" / "browser-managed").is_file()
     if session:
-        if environment.get("HOLOQA_MANAGED_BROWSER") == "1":
+        if environment.get("HOLOQA_MANAGED_BROWSER") == "1" or managed_standalone:
             from holoqa.browser import session_name
             # Physical names are also accepted for wrapper cleanup.
             if not (args and args[0] == "close"):
-                session = session_name(Path(environment["HOLOQA_RUN_DIR"]), session)
+                session = session_name(_CAPTURE_RUN.get() or Path(environment["HOLOQA_RUN_DIR"]), session)
         environment["AGENT_BROWSER_SESSION"] = session
     # Plan-declared browser options travel as the documented env var, so they
     # apply to the browser the daemon already runs rather than only to this
     # invocation. A self-signed staging certificate is a property of the
     # application under test, not of one command.
     merged_args = list(browser_args or []) + list(_browser_args())
+    if _CAPTURE_RUN.get() is not None:
+        from holoqa import plan as plan_module
+        current_plan = plan_module.load(_CAPTURE_RUN.get() / "plan.pinned.yaml")
+        merged_args = list(browser_args or []) + list(current_plan.meta.browser.args)
+        if current_plan.meta.browser.ignore_https_errors:
+            merged_args.append("--ignore-https-errors")
     if merged_args:
         existing = environment.get("AGENT_BROWSER_ARGS", "").strip()
         environment["AGENT_BROWSER_ARGS"] = (
             f"{existing} {' '.join(merged_args)}".strip()
         )
+    if managed_standalone:
+        from holoqa.browser import sessions
+        from holoqa.browser_driver import execute
+        from holoqa.run import Run
+        environment.update({"HOLOQA_RUN_DIR": str(current_run),
+                            "HOLOQA_BROWSER_BINARY": environment.get("HOLOQA_BROWSER_BINARY", binary),
+                            "HOLOQA_BROWSER_SESSIONS": json.dumps(sessions(Run(current_run)))})
+        try:
+            return execute(args, environment, timeout=timeout).decode("utf-8", errors="replace").strip()
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise CaptureError(str(error)) from error
     handle, capture = tempfile.mkstemp(prefix="holoqa-cli-", suffix=".out")
     os.close(handle)
     try:
@@ -153,6 +177,8 @@ def run_cli(
                 raise CaptureError(
                     f"agent-browser timed out after {timeout}s: {' '.join(args[:2])}"
                 ) from error
+        if Path(capture).stat().st_size > MAX_CAPTURE_BYTES:
+            raise CaptureError("Browser response exceeds 8 MiB; narrow the capture")
         raw = Path(capture).read_bytes().decode("utf-8", errors="replace")
     finally:
         try:
@@ -200,7 +226,7 @@ def redact_payload(value: Any, depth: int = 0) -> Any:
     shipped in a ZIP, so the body is walked too.
     """
     if depth > 12:
-        return value
+        return "<redacted: depth limit>"
     if isinstance(value, dict):
         return {
             key: ("<redacted>" if REDACT_KEYS.search(str(key)) else redact_payload(item, depth + 1))
@@ -290,12 +316,28 @@ _API_JS = """
     init.body = body;
   }
   let response, text = '', error = null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  init.signal = controller.signal;
   try {
     response = await fetch(url, init);
-    text = await response.text();
+    const reader = response.body && response.body.getReader();
+    const chunks = []; let size = 0;
+    if (reader) {
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 1048576) { await reader.cancel(); throw new Error('API response exceeds 1 MiB'); }
+        chunks.push(value);
+      }
+    }
+    const bytes = new Uint8Array(size); let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    text = new TextDecoder().decode(bytes);
   } catch (e) {
     error = String(e && e.message ? e.message : e);
-  }
+  } finally { clearTimeout(timer); }
   const headers = {};
   if (response) response.headers.forEach((v, k) => { headers[k] = v; });
   let parsed = null;
@@ -377,20 +419,22 @@ _SSE_JS = """
   const url = %(url)s;
   const seconds = %(seconds)s;
   const events = [];
+  let count = 0, finished = false, timer;
   let ended = 'timeout';
   const source = new EventSource(url, { withCredentials: true });
   const finish = () => {
+    if (finished) return; finished = true; clearTimeout(timer);
     try { source.close(); } catch (e) {}
     resolve(JSON.stringify({
       url, seconds, ended,
-      count: events.length,
+      count,
       types: [...new Set(events.map(e => e.type))],
       events: events.slice(0, 50)
     }));
   };
-  source.onmessage = (e) => events.push({ type: 'message', data: String(e.data).slice(0, 500) });
+  source.onmessage = (e) => { count++; if (events.length < 50) events.push({ type: 'message', data: String(e.data).slice(0, 500) }); };
   source.onerror = () => { ended = 'error'; finish(); };
-  setTimeout(finish, seconds * 1000);
+  timer = setTimeout(finish, seconds * 1000);
 }))()
 """
 
@@ -399,13 +443,17 @@ def sse(
     destination: Path, url: str, seconds: int = SSE_SECONDS, *, session: str = ""
 ) -> dict[str, Any]:
     """Hold an SSE stream open briefly and record what arrived."""
+    if not 1 <= seconds <= MAX_SSE_SECONDS:
+        raise CaptureError("SSE duration must be between 1 and 60 seconds")
     js = _SSE_JS % {"url": json.dumps(url), "seconds": int(seconds)}
     result = evaluate(js, timeout=seconds + 60, session=session)
     if isinstance(result, str):
         result = json.loads(result)
     if not isinstance(result, dict):
         raise CaptureError(f"unexpected sse capture result: {result!r}")
-    _write_json(destination, result)
+    for event in result.get("events", []):
+        event["data"] = redact_text(event.get("data"))
+    _write_json(destination, redact_payload(result))
     return {
         "url": url,
         "count": result.get("count", 0),
@@ -416,57 +464,80 @@ def sse(
 
 _BLOB_HOOK_JS = """
 (() => {
-  if (window.__holoqaBlobs) return 'already';
-  window.__holoqaBlobs = [];
-  const original = URL.createObjectURL.bind(URL);
-  URL.createObjectURL = (obj) => {
-    try {
-      const reader = new FileReader();
-      reader.onload = () => window.__holoqaBlobs.push({
-        size: obj.size, type: obj.type, data: String(reader.result).split(',')[1] || ''
-      });
-      reader.readAsDataURL(obj);
-    } catch (e) {}
-    return original(obj);
-  };
-  return 'installed';
+  const previous = window.__holoqaDownload;
+  if (previous && previous.reader && previous.reader.readyState === 1) previous.reader.abort();
+  const capture = {id: String(Date.now()) + '-' + Math.random(), ready: false};
+  window.__holoqaDownload = capture;
+  if (!window.__holoqaOriginalObjectURL) {
+    window.__holoqaOriginalObjectURL = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = (obj) => {
+      const current = window.__holoqaDownload;
+      if (current && !current.started) {
+        current.started = true;
+        if (obj.size > 4194304) { current.error = 'Download exceeds 4 MiB'; current.ready = true; }
+        else {
+          const reader = new FileReader(); current.reader = reader;
+          reader.onload = () => {
+            current.data = String(reader.result).split(',')[1] || '';
+            current.size = obj.size; current.type = obj.type;
+            current.reader = null; current.ready = true;
+          };
+          reader.onerror = () => { current.error = 'Download read failed'; current.reader = null; current.ready = true; };
+          reader.readAsDataURL(obj);
+        }
+      }
+      return window.__holoqaOriginalObjectURL(obj);
+    };
+  }
+  return capture.id;
 })()
 """
 
 _BLOB_READ_JS = """
-(() => JSON.stringify((window.__holoqaBlobs || []).map(b => ({
-  size: b.size, type: b.type, data: b.data
-}))))()
+(() => {
+  const capture = window.__holoqaDownload;
+  if (!capture || !capture.ready) return null;
+  const value = {id: capture.id, size: capture.size, type: capture.type, data: capture.data, error: capture.error};
+  window.__holoqaDownload = null;
+  return JSON.stringify(value);
+})()
 """
 
 
 def arm_download(*, session: str = "") -> str:
-    """Install a blob interceptor before the click that triggers a download.
-
-    Client-side exports are produced as a Blob and clicked through an anchor;
-    CDP download interception reports them as ``canceled`` every time. Reading
-    the Blob directly is the only path the prior tool found that works.
-    """
+    """Rearm a fresh, bounded, one-shot capture before triggering an export."""
     return str(evaluate(_BLOB_HOOK_JS, session=session))
 
 
 def collect_download(destination: Path, *, session: str = "") -> dict[str, Any]:
-    """Write the most recent intercepted blob to disk."""
-    result = evaluate(_BLOB_READ_JS, session=session)
-    if isinstance(result, str):
-        result = json.loads(result)
-    if not isinstance(result, list) or not result:
-        raise CaptureError(
-            "no download was intercepted. Call arm_download before the click that "
-            "starts the export, and allow a few seconds for PDF/PPTX rendering."
-        )
-    blob = result[-1]
-    payload = base64.b64decode(blob.get("data") or "")
+    """Wait for this export, consume it once, and release the page buffer."""
+    deadline = time.monotonic() + 15
+    while True:
+        result = evaluate(_BLOB_READ_JS, session=session)
+        if isinstance(result, str):
+            result = json.loads(result)
+        if isinstance(result, dict):
+            break
+        if time.monotonic() >= deadline:
+            evaluate("(() => { const c = window.__holoqaDownload; if (c && c.reader) c.reader.abort(); window.__holoqaDownload = null; })()", session=session)
+            raise CaptureError("No completed download intercepted within 15 seconds")
+        time.sleep(0.1)
+    if result.get("error"):
+        raise CaptureError(str(result["error"]))
+    encoded = result.get("data") or ""
+    if len(encoded) > 5592408:
+        raise CaptureError("Download exceeds 4 MiB")
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except ValueError as error:
+        raise CaptureError("Invalid download payload") from error
+    if len(payload) > 4194304:
+        raise CaptureError("Download exceeds 4 MiB")
     if not payload:
-        raise CaptureError("intercepted download was empty")
+        raise CaptureError("Intercepted download was empty")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(payload)
-    return {"bytes": len(payload), "content_type": blob.get("type", "")}
+    return {"bytes": len(payload), "content_type": result.get("type", "")}
 
 
 def _write_json(destination: Path, payload: dict[str, Any]) -> None:
@@ -504,7 +575,7 @@ def wait_for(expression: str, *, session: str = "", timeout_ms: int = 0) -> dict
     last = None
     while True:
         try:
-            last = evaluate(js, timeout=30, session=session)
+            last = evaluate(js, timeout=max(1, min(30, int(deadline - time.monotonic()) + 1)), session=session)
         except CaptureError as error:
             last = f"error: {error}"
         if last is True or str(last).lower() == "true":

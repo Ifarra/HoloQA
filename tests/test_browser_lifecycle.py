@@ -66,12 +66,15 @@ def test_standalone_session_names_are_unchanged(monkeypatch):
 
 def test_cleanup_is_scoped_and_attempts_every_actor_on_failure(run, monkeypatch):
     seen = []
-    def close(args, *, session, timeout):
+    (run.out_dir / 'browser-sessions.json').write_text(json.dumps({'active': list(browser.sessions(run).values())}))
+    monkeypatch.setattr('shutil.which', lambda *a, **k: 'agent-browser')
+    def close(args, env, timeout):
+        session = env['AGENT_BROWSER_SESSION']
         assert args == ['close']
         assert timeout == 10
         seen.append(session)
-        raise observe.CaptureError('fixture failure')
-    monkeypatch.setattr(observe, 'run_cli', close)
+        raise ValueError('fixture failure')
+    monkeypatch.setattr('holoqa.browser_driver.raw', close)
     errors = browser.cleanup(run)
     assert set(seen) == set(browser.sessions(run).values())
     assert len(errors) == 2

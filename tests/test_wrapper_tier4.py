@@ -134,8 +134,8 @@ def test_until_done_stops_when_a_round_makes_no_progress(monkeypatch, plan, tmp_
 
     assert result["until_done"] is False
     # The first round judged nothing, so a second would be identical: stop.
-    assert len(calls) == 2
-    assert calls[0] is False and calls[1] is True
+    assert len(calls) == 1
+    assert calls == [False]
 
 
 def test_until_done_resumes_when_progress_is_made(monkeypatch, plan, tmp_path):

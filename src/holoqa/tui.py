@@ -7,6 +7,8 @@ events, while HoloQA remains the only source of verdicts and release decisions.
 from __future__ import annotations
 
 import threading
+import asyncio
+from collections import deque
 import shutil
 import subprocess
 import tempfile
@@ -331,8 +333,10 @@ class HoloQATui(App[None]):
         self._path_revealer = path_revealer or self._reveal_path
         self._worker: threading.Thread | None = None
         self._cancel_event = threading.Event()
-        self._log_lines: list[str] = []
-        self._transcript_entries: list[TranscriptEntry] = []
+        self._log_lines: deque[str] = deque(maxlen=2000)
+        self._journal_path: Path | None = None
+        self._shutting_down = False
+        self._transcript_entries: deque[TranscriptEntry] = deque(maxlen=2000)
         self.transcript_paused = False
         self.transcript_filter = "all"
         self.transcript_query = ""
@@ -688,12 +692,17 @@ class HoloQATui(App[None]):
         timestamp = timestamp or datetime.now().strftime("%H:%M:%S")
         copied = f"{timestamp}  {source:<16}  {text}"
         self._log_lines.append(copied)
-        self._transcript_entries.append(TranscriptEntry(timestamp, source, text, step_id))
-        self._render_transcript()
+        entry = TranscriptEntry(timestamp, source, text, step_id)
+        self._transcript_entries.append(entry)
+        self._persist_log_append(copied)
+        if not self.transcript_query and self.transcript_filter == "all" and self.is_running:
+            self._render_transcript_entry(entry)
+        else:
+            self._render_transcript()
 
     def _visible_transcript_entries(self) -> list[TranscriptEntry]:
         query = self.transcript_query.casefold().strip()
-        entries = self._transcript_entries
+        entries = list(self._transcript_entries)
         if self.transcript_filter == "holoqa":
             entries = [entry for entry in entries if entry.source.startswith("holoqa")]
         elif self.transcript_filter == "agent":
@@ -713,21 +722,23 @@ class HoloQATui(App[None]):
         log = self.query_one("#agent-log", RichLog)
         log.clear()
         for entry in self._visible_transcript_entries():
-            rendered = Text()
-            rendered.append(entry.timestamp, style="#8299ad")
-            rendered.append("  ")
-            rendered.append(f"{entry.source:<16}", style="#46e5f0")
-            rendered.append("  ")
-            rendered.append(
-                entry.message,
-                style="#ef6464" if entry.message.startswith("ERROR:") else "#c8d3df",
-            )
-            if entry.step_id:
-                rendered.stylize(
-                    Style(underline=False, meta={"@click": f"app.select_step('{entry.step_id}')"}),
-                    0, len(rendered),
-                )
-            log.write(rendered, scroll_end=not self.transcript_paused)
+            self._render_transcript_entry(entry)
+
+    def _render_transcript_entry(self, entry: TranscriptEntry) -> None:
+        if not self.is_running:
+            return
+        try:
+            log = self.query_one("#agent-log", RichLog)
+        except NoMatches:
+            return
+        log.max_lines = 2000
+        rendered = Text()
+        rendered.append(entry.timestamp, style="#8299ad")
+        rendered.append(f"  {entry.source:<16}  ", style="#46e5f0")
+        rendered.append(entry.message, style="#ef6464" if entry.message.startswith("ERROR:") else "#c8d3df")
+        if entry.step_id:
+            rendered.stylize(Style(meta={"@click": f"app.select_step('{entry.step_id}')"}), 0, len(rendered))
+        log.write(rendered, scroll_end=not self.transcript_paused)
 
     def _append_demo_transcript(self) -> None:
         lines = [
@@ -1154,9 +1165,7 @@ class HoloQATui(App[None]):
         total = len(self.state.steps)
         done = sum(counts.values())
         # An incomplete run is not releasable, whatever the counts say.
-        decision = "HOLD" if done < total else (
-            "HOLD" if counts["FAIL"] or counts["BLOCKED"] else "RELEASE"
-        )
+        decision = run.status(run.pinned_plan())["decision"]
         if self.state.decision != decision:
             self.state.decision = decision
             changed = True
@@ -1301,7 +1310,7 @@ class HoloQATui(App[None]):
 
     def _copy_log(self) -> None:
         payload = "\n".join(self._log_lines) + ("\n" if self._log_lines else "")
-        self._persist_log(payload)
+        self._persist_log()
         copied = self._copy_text(payload)
         suffix = " and clipboard" if copied else ""
         self._set_safety(f"Log copied to {self.log_path}{suffix}")
@@ -1388,14 +1397,38 @@ class HoloQATui(App[None]):
             if self.run_dir:
                 self.log_path = Path(self.run_dir) / "out" / "agent-log.txt"
             else:
-                self.log_path = Path(tempfile.gettempdir()) / "holoqa-tui-demo-agent-log.txt"
+                self.log_path = Path(tempfile.gettempdir()) / f"holoqa-tui-{id(self)}-agent-log.txt"
+        if payload is None and self.log_path.is_file():
+            return False
         if payload is None:
             payload = "\n".join(self._log_lines) + ("\n" if self._log_lines else "")
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text(payload, encoding="utf-8")
+        return True
 
-    def on_unmount(self) -> None:
-        """Leave a copy even when the user exits before pressing the copy key."""
+    def _persist_log_append(self, line: str) -> None:
+        try:
+            created = self._persist_log()
+            self._journal_path = self.log_path
+            if created:
+                return
+            with self.log_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            pass
+
+    async def _shutdown_agent(self) -> None:
+        self._shutting_down = True
+        self._cancel_event.set()
+        if self._worker and self._worker.is_alive():
+            await asyncio.to_thread(self._worker.join)
+
+    async def action_quit(self) -> None:
+        await self._shutdown_agent()
+        self.exit()
+
+    async def on_unmount(self) -> None:
+        await self._shutdown_agent()
         try:
             self._persist_log()
         except OSError:
@@ -1422,10 +1455,7 @@ class HoloQATui(App[None]):
             # this exact path, and knowing it up front is what lets the dashboard
             # read verdicts as they land instead of only when the agent exits.
             if not self.resume and not self.run_dir:
-                self.run_dir = str(
-                    self.request.cwd.resolve() / ".holoqa" / "runs" /
-                    f"{datetime.now().strftime('%Y%m%d-%H%M')}-{plan.meta.app}"
-                )
+                self.run_dir = str(agent_module.new_run_directory(plan, self.request))
             self._render_state()
         except Exception as error:
             self._set_safety(f"Cannot load plan: {error}")
@@ -1444,6 +1474,8 @@ class HoloQATui(App[None]):
         assert self.plan_path is not None
 
         def callback(channel: str, line: str) -> None:
+            if self._shutting_down:
+                return
             try:
                 self.call_from_thread(self._handle_agent_line, channel, line)
             except RuntimeError:
@@ -1470,9 +1502,11 @@ class HoloQATui(App[None]):
                     self.plan_path, request, tag=self.tag, commit=self.commit,
                     tester=self.tester, base_url=self.base_url, run_dir=self.run_dir,
                 )
-            self.call_from_thread(self._finish_agent, result)
+            if not self._shutting_down:
+                self.call_from_thread(self._finish_agent, result)
         except Exception as error:
-            self.call_from_thread(self._handle_worker_error, str(error))
+            if not self._shutting_down:
+                self.call_from_thread(self._handle_worker_error, str(error))
 
     def _handle_worker_error(self, error: str) -> None:
         self._last_error = error

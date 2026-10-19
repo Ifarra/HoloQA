@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from holoqa.storage import atomic_json, file_lock
 from holoqa import BLOCKED, FAIL, PASS
 from holoqa import plan as plan_module
 from holoqa import run as run_module
@@ -172,9 +173,7 @@ class Workspace:
 
     def _write(self, data: dict[str, Any]) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.index_path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        atomic_json(self.index_path, data)
 
     # ------------------------------------------------------------- run lookup
 
@@ -220,10 +219,11 @@ class Workspace:
         """Point the workspace at ``run_id``. Returns the new current run id."""
         if not (self.runs_dir / run_id / run_module.RUN_FILE).is_file():
             raise GuardrailError(f"no run {run_id!r} in workspace {self.app!r}")
-        data = self.read()
-        data["current_run"] = run_id
-        data.setdefault("app", self.app)
-        self._write(data)
+        with file_lock(self.dir / ".workspace.lock"):
+            data = self.read()
+            data["current_run"] = run_id
+            data.setdefault("app", self.app)
+            self._write(data)
         return run_id
 
     # ------------------------------------------------------------- start runs
@@ -243,6 +243,10 @@ class Workspace:
         refusal for a caller that names its own directory — that guardrail is
         still correct; what was wrong was guessing a name that could collide.
         """
+        with file_lock(self.dir / ".workspace.lock"):
+            return self._start_run_locked(plan, meta, retest_of=retest_of, run_id=run_id)
+
+    def _start_run_locked(self, plan, meta=None, *, retest_of="", run_id=""):
         if not run_id:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
             run_id = f"{self.next_sequence():03d}-{stamp}"
@@ -296,7 +300,7 @@ class Workspace:
             "counts": counts,
             "pending": pending,
             "total": sum(counts.values()) + pending,
-            "decision": "HOLD" if pending else decision(counts),
+            "decision": "HOLD" if pending or run.integrity(adopt=False)["status"] not in {"verified", "attested"} else decision(counts),
             "retest_of": retest_of or meta.get("retest_of") or None,
             "integrity": run.integrity(adopt=False)["status"],
         }
