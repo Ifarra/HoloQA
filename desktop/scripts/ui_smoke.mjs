@@ -18,10 +18,10 @@ const source = `meta:\n  app: storefront\n  base_url: http://localhost:3000\nsta
 await writeFile(join(project,'holoqa.plan.yaml'),source);
 await writeFile(join(project,'package.json'),JSON.stringify({dependencies:{next:'test'},scripts:{dev:'DO NOT EXECUTE'}}));
 const python = process.env.HOLOQA_DESKTOP_PYTHON || join(root,'.venv',process.platform==='win32'?'Scripts/python.exe':'bin/python');
-const engine = spawn(python,['-m','holoqa.desktop','--state-dir',join(temp,'state')],{cwd:root,stdio:['pipe','pipe','inherit']});
-const pending = new Map();let id=0;
+const engine = spawn(python,[join(desktop,'scripts/ui_engine_fixture.py'),'--state-dir',join(temp,'state')],{cwd:root,stdio:['pipe','pipe','inherit']});
+const pending = new Map();let id=0;let forwardEvent=async()=>{};
 const lines=createInterface({input:engine.stdout});
-lines.on('line',line=>{const m=JSON.parse(line);if(m.id){const p=pending.get(m.id);pending.delete(m.id);if(p)m.error?p.reject(new Error(m.error.message)):p.resolve(m.result);}});
+lines.on('line',line=>{const m=JSON.parse(line);if(m.id){const p=pending.get(m.id);pending.delete(m.id);if(p)m.error?p.reject(new Error(m.error.message)):p.resolve(m.result);}else if(m.event){void forwardEvent(m);}});
 const request=(method,params={})=>new Promise((resolve,reject)=>{const key=++id;pending.set(key,{resolve,reject});engine.stdin.write(JSON.stringify({id:key,method,params})+'\n');});
 const vite=spawn(process.execPath,[join(desktop,'node_modules/vite/bin/vite.js'),'--host','127.0.0.1','--port','1421'],{cwd:desktop,stdio:'ignore'});
 let browser;
@@ -40,9 +40,11 @@ try {
     if(command.startsWith('plugin:event|'))return 1;
     throw new Error('Unexpected native command');
   });
+  forwardEvent=event=>page.evaluate(event=>window.__engineTestEvent?.(event),event).catch(()=>{});
   await page.addInitScript(()=>{
     globalThis.isTauri=true;
-    window.__TAURI_INTERNALS__={invoke:(command,args)=>window.__nativeTest(command,args),transformCallback:()=>1,unregisterCallback:()=>{}};
+    let callback;window.__engineTestEvent=payload=>callback?.({payload});
+    window.__TAURI_INTERNALS__={invoke:(command,args)=>window.__nativeTest(command,args),transformCallback:fn=>{callback=fn;return 1;},unregisterCallback:()=>{}};
     window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:()=>{}};
   });
   await page.goto('http://127.0.0.1:1421');
@@ -73,8 +75,32 @@ try {
   await page.getByRole('button',{name:'Command palette',exact:true}).click();
   await page.getByRole('dialog').getByRole('button',{name:'Overview',exact:false}).click();
   for(const width of [1440,1000,800]){await page.setViewportSize({width,height:1050});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,`Layout overflow at ${width}`);}
+  // Start a real engine run against a deterministic Codex protocol peer.
+  // The peer cannot run commands and never makes a model call.
+  await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Test plan',exact:true}).click();
+  await page.getByRole('checkbox').check();
+  await page.waitForFunction(()=>!document.querySelector('.review-footer .button').disabled);
+  await page.getByRole('button',{name:'Start supervised run'}).click();
+  await page.getByRole('dialog').getByRole('button',{name:'Start run',exact:true}).click();
+  await page.getByRole('heading',{name:'Codex is waiting for approval'}).waitFor();
+  await page.getByRole('dialog').getByRole('button',{name:'Pause run',exact:true}).click();
+  await page.getByRole('button',{name:'Resume run',exact:true}).waitFor();
+  assert.equal(await page.getByRole('dialog').count(),0,'Pause clears pending approvals');
+  assert.equal(await page.getByRole('button',{name:'Open folder',exact:true}).isEnabled(),false);
+  await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Run history',exact:true}).click();
+  await page.getByRole('button',{name:'Inspect',exact:false}).last().click();
+  await page.getByRole('button',{name:'Resume run',exact:true}).click();
+  await page.getByRole('button',{name:'Pause run',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Pause run',exact:true}).click();
+  await page.getByRole('button',{name:'Resume run',exact:true}).waitFor();
+  for(const width of [1440,1000,800]){await page.setViewportSize({width,height:1050});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,`Paused layout overflow at ${width}`);}
+  await page.setViewportSize({width:1440,height:1050});
+  if(process.env.HOLOQA_SCREENSHOTS)await page.screenshot({path:join(process.env.HOLOQA_SCREENSHOTS,'desktop-paused.png'),fullPage:true});
+  await page.getByRole('button',{name:'Stop run',exact:true}).click();
+  await page.getByText('interrupted ·',{exact:false}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Resume run',exact:true}).count(),0);
   assert.deepEqual(errors,[]);
-  console.log('UI + real stdio engine smoke passed: discovery, review, external edit refusal, history, navigation, responsive layout. No model calls.');
+  console.log('UI + real stdio engine smoke passed: discovery, review, external edit refusal, history, navigation, responsive layout, approval→pause→resume→pause→stop. No model calls.');
 } finally {
   if(browser)await browser.close();
   engine.stdin.end();lines.close();vite.kill();

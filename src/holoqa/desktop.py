@@ -50,6 +50,8 @@ class Engine:
         self.tool_lock = threading.RLock()
         self.worker: threading.Thread | None = None
         self.deadline = 0.0
+        self.pause_deadline = 0.0
+        self.state_changed = threading.Event()
         self.closing = False
         self.provider_status = {"installed": bool(shutil.which("codex")), "authentication": "unchecked"}
 
@@ -70,7 +72,7 @@ class Engine:
         status = run.status(run.pinned_plan())
         # Proven assertions and a completed provider lifecycle are separate.
         # Never display RELEASE while running, interrupted, or failed.
-        if self.run_state(run) in {"starting", "running", "stopping", "interrupted", "failed"}:
+        if self.run_state(run) in {"starting", "running", "pausing", "paused", "stopping", "interrupted", "failed"}:
             status["decision"] = "HOLD"
         return status
 
@@ -92,8 +94,69 @@ class Engine:
         return candidate
 
     def _idle(self):
-        if self.lifecycle in {"starting", "running", "stopping"}:
+        if self.lifecycle in {"starting", "running", "pausing", "paused", "stopping"}:
             raise DesktopError("Stop the active run before changing projects or starting another")
+
+    def read_project_json(self, relative, limit=LIMIT):
+        """Read small regular project metadata, never a device or pipe."""
+        candidate = self.contained(relative)
+        if not candidate.is_file() or candidate.stat().st_size > limit:
+            raise DesktopError("Project metadata must be a regular file smaller than 1 MiB")
+        with candidate.open("rb") as handle:
+            contents = handle.read(limit + 1)
+        if len(contents) > limit:
+            raise DesktopError("Project metadata exceeds its size limit")
+        value = json.loads(contents)
+        if not isinstance(value, dict):
+            raise DesktopError("Project metadata must contain a JSON object")
+        return value
+
+    def validate_storage_tree(self, directory, limit=20_000):
+        """Reject redirected storage before writing or packaging project data.
+
+        Checking only .holoqa misses nested workspace, runs, out, and lock-file
+        links. Reject redirected descendants, including Windows junctions, and
+        bound inspection rather than recursively following an arbitrary tree.
+        """
+        directory = Path(directory).absolute()
+        if self.root is None or not directory.resolve().is_relative_to(self.root):
+            raise DesktopError("Storage path leaves the selected project")
+        # Inspect ancestors too: an already-resolved Workspace otherwise hides
+        # a link in .holoqa/workspaces from the descendant walk.
+        for ancestor in (directory, *directory.parents):
+            if ancestor == self.root:
+                break
+            if ancestor.is_symlink() or ancestor.resolve() != ancestor:
+                raise DesktopError("Linked storage paths are not supported")
+        pending, count = [directory], 0
+        while pending:
+            parent = pending.pop()
+            if not parent.exists():
+                continue
+            with os.scandir(parent) as entries:
+                for entry in entries:
+                    count += 1
+                    if count > limit:
+                        raise DesktopError("Storage inspection limit exceeded; archive older runs before continuing")
+                    path = Path(entry.path)
+                    if entry.is_symlink() or path.resolve() != path:
+                        raise DesktopError("Linked storage paths are not supported")
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(path)
+                    elif not entry.is_file(follow_symlinks=False):
+                        raise DesktopError("Storage must contain only regular files and directories")
+
+    def validated_workspace(self, plan):
+        directory = self.contained(".holoqa", exists=False) / "workspaces" / workspace.slug_app(plan.meta.app)
+        self.validate_storage_tree(directory)
+        return workspace.workspace_for(plan, root=self.contained(".holoqa", exists=False))
+
+    def validate_export(self, run):
+        self.validate_storage_tree(run.dir)
+        run_id = run.read().get("run_id", "")
+        import re
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
+            raise DesktopError("Run identifier cannot be used as an archive filename")
 
     def open_project(self, path):
         self._idle()
@@ -126,8 +189,9 @@ class Engine:
                 break
         framework = "Local project"
         try:
-            package = json.loads(self.contained("package.json").read_text("utf-8"))
-            dependencies = {**package.get("dependencies", {}), **package.get("devDependencies", {})}
+            package = self.read_project_json("package.json")
+            dependencies = {**(package.get("dependencies") if isinstance(package.get("dependencies"), dict) else {}),
+                            **(package.get("devDependencies") if isinstance(package.get("devDependencies"), dict) else {})}
             framework = "Next.js" if "next" in dependencies else "React" if "react" in dependencies else "Node.js"
         except (OSError, ValueError, DesktopError):
             pass
@@ -224,17 +288,19 @@ class Engine:
             raise DesktopError("Plan or resolved target changed. Review again.")
         if not target.startswith(("http://", "https://")) or "${" in target:
             raise DesktopError("Set a resolved HTTP or HTTPS base_url in the plan")
+        selected_workspace = self.validated_workspace(plan)
         if not shutil.which("agent-browser"):
             raise DesktopError("Install agent-browser and its browser runtime before running QA")
         from holoqa import observe
         observe.set_browser_options(plan.meta.browser.ignore_https_errors, plan.meta.browser.args)
         specs = self._specs()
         provider = CodexSession(self.root, self.emit, self.tool)
+        allocated = False
         try:
             if provider.initialize() != "ready":
                 raise DesktopError("Sign into Codex CLI with `codex login`, then check the connection")
-            self.run = workspace.workspace_for(plan, root=self.contained(".holoqa", exists=False)).start_run(
-                plan, meta={"base_url": target, "desktop": True})
+            self.run = selected_workspace.start_run(plan, meta={"base_url": target, "desktop": True})
+            allocated = True
             self.provider = provider
             self.lifecycle = "starting"
             # Pin the exact plan object loaded and checked above, not a later read.
@@ -245,10 +311,11 @@ class Engine:
             self.lifecycle = "running"
             provider.start(prompt, specs)
         except Exception:
-            self.lifecycle = "failed"
+            if allocated:
+                self.lifecycle = "failed"
             provider.close()
             with self.tool_lock:
-                if self.run:
+                if allocated and self.run:
                     browser.cleanup(self.run)
             self.provider = None
             raise
@@ -260,24 +327,93 @@ class Engine:
         return self.snapshot()
 
     def _wait(self, provider):
-        while not provider.finished.wait(.5):
+        while True:
             if time.monotonic() >= self.deadline:
                 self.stop()
                 return
-        # Freeze tool dispatch before cleanup; never destroy a capture in flight.
+            if not provider.finished.wait(.2):
+                if self.lifecycle == "pausing" and time.monotonic() >= self.pause_deadline:
+                    self.emit("activity", {"message": "Pause was not confirmed; stopping the run."})
+                    self.stop()
+                    return
+                continue
+            with self.lock:
+                if self.provider is not provider:
+                    return
+                # Resume can clear the old completion while this watcher waits
+                # for the session lock. Recheck before interpreting its status.
+                if not provider.finished.is_set():
+                    continue
+                if (self.lifecycle == "pausing" and provider.turn_status == "interrupted"
+                        and not provider.disconnected):
+                    # Drain a tool already in flight before announcing paused.
+                    with self.tool_lock:
+                        self.lifecycle = "paused"
+                    self.emit("approvals.cleared", {})
+                    self.emit("run.updated", {})
+                if self.lifecycle != "paused" or provider.disconnected:
+                    self.lifecycle = "completed" if provider.turn_status == "completed" and not provider.disconnected else "failed"
+                    provider.close()
+                    with self.tool_lock:
+                        if self.run:
+                            errors = browser.cleanup(self.run)
+                            if errors:
+                                self.emit("activity", {"message": "Browser cleanup needs attention"})
+                    self.provider = None
+                    self.emit("approvals.cleared", {})
+                    self.emit("run.updated", {})
+                    return
+            # A paused turn's finished flag stays set. Wait without spinning;
+            # also notice provider death and enforce the wall-clock deadline.
+            while self.lifecycle == "paused" and not provider.disconnected:
+                self.state_changed.wait(.2)
+                self.state_changed.clear()
+                if time.monotonic() >= self.deadline:
+                    self.stop()
+                    return
+
+    def pause(self):
         with self.lock:
-            if self.provider is not provider:
-                return
-            self.lifecycle = "completed" if provider.turn_status == "completed" else "failed"
-            provider.close()
-            with self.tool_lock:
-                if self.run:
-                    errors = browser.cleanup(self.run)
-                    if errors:
-                        self.emit("activity", {"message": "Browser cleanup needs attention"})
-            self.provider = None
-            self.emit("approvals.cleared", {})
+            if self.lifecycle != "running" or not self.provider:
+                raise DesktopError("Only a running QA session can be paused")
+            self.lifecycle = "pausing"
+            self.pause_deadline = time.monotonic() + 15
             self.emit("run.updated", {})
+            try:
+                if self.provider.interrupt() is False:
+                    # Completion won the race with the Pause click. Let the
+                    # watcher finalize it instead of downgrading it to stopped.
+                    self.lifecycle = "running"
+            except Exception:
+                if self.provider and self.provider.finished.is_set() and self.provider.turn_status == "completed":
+                    self.lifecycle = "running"
+                    return {"lifecycle": self.lifecycle}
+                self.stop()
+                raise
+            self.emit("approvals.cleared", {})
+            return {"lifecycle": self.lifecycle}
+
+    def resume(self):
+        with self.lock:
+            if self.lifecycle != "paused" or not self.provider:
+                raise DesktopError("Only a paused QA session can be resumed")
+            if time.monotonic() >= self.deadline:
+                self.stop()
+                raise DesktopError("The 30-minute session limit expired; start a new run")
+            # Resume the same thread with the same pinned plan and ledger.
+            # A fresh turn may invoke a tool immediately, so enable dispatch first.
+            self.lifecycle = "running"
+            try:
+                self.provider.resume("Continue the same QA run using its pinned plan. Inspect holoqa_run_status first. "
+                    "Preserve existing evidence; check browser state because the application may have changed while paused. "
+                    "Use only the supplied HoloQA tools for browser actions. Do not edit project files.")
+            except Exception:
+                self.stop()
+                raise
+            finally:
+                self.state_changed.set()
+            self.emit("run.updated", {})
+            return {"lifecycle": self.lifecycle}
 
     def stop(self):
         with self.lock:
@@ -289,6 +425,7 @@ class Engine:
                     if self.run:
                         browser.cleanup(self.run)
                 self.lifecycle = "interrupted"
+                self.state_changed.set()
                 self.emit("approvals.cleared", {})
                 self.emit("run.updated", {})
         return {"lifecycle": self.lifecycle}
@@ -331,6 +468,8 @@ class Engine:
             data = run.read()
             return {"status": status, "path": str(run.dir.relative_to(self.root)),
                     "steps": list(data["steps"].values()),
+                    "session": {"path": str(self.run.dir.relative_to(self.root)), "lifecycle": self.lifecycle}
+                        if self.provider and self.run else None,
                     "lifecycle": self.run_state(run)}
 
     def artifact(self, path, file):
@@ -364,7 +503,7 @@ class Engine:
         if method == "run.stop":
             return self.stop()
         if method == "approval.respond":
-            if not self.provider:
+            if not self.provider or self.lifecycle != "running":
                 raise DesktopError("Provider is no longer running")
             self.provider.approve(params["id"], params["decision"])
             return {"ok": True}
@@ -392,6 +531,10 @@ class Engine:
                 return self.check_provider()
             if method == "run.start":
                 return self.start(params["token"])
+            if method == "run.pause":
+                return self.pause()
+            if method == "run.resume":
+                return self.resume()
             if method == "run.snapshot":
                 return self.snapshot(params.get("path", ""))
             if method == "run.history":
@@ -404,6 +547,7 @@ class Engine:
                 if self.run_state(selected) in {"interrupted", "failed"}:
                     raise DesktopError("This provider run did not complete. Inspect its evidence or start a new run before exporting.")
                 # Workbooks are outside this milestone; do not follow a plan path.
+                self.validate_export(selected)
                 result = report.package(selected)
                 return {"message": "Report saved in the run's out folder", "result": result}
             raise DesktopError("Unsupported desktop method")

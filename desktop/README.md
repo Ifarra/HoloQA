@@ -14,7 +14,7 @@ browser lifecycle and Windows process-tree fixes.
 - Codex app-server initialization and existing account-state checks. No credential
   file reads, token copies, global configuration edits, or interactive login.
 - Supervised Codex execution with command approval requests, Allow once / Deny,
-  source-change refusals, cancellation, and a 30-minute execution limit.
+  source-change refusals, pause/resume, cancellation, and a 30-minute session limit.
 - In-process HoloQA tools for browser operation, capture, and judgment; tool calls
   cannot choose another run or assert PASS/FAIL. The same sidecar owns the ledger
   when navigating between screens.
@@ -22,6 +22,19 @@ browser lifecycle and Windows process-tree fixes.
   and engine report packaging. Historical runs cannot authorize release simply
   because their saved steps say PASS.
 - Windows x64 sidecar packaging, an executable smoke check, and NSIS installer CI.
+
+Pause requests a Codex turn interruption and rejects outstanding approvals.
+The interface shows **Pausing** until interruption is confirmed and an in-flight
+QA tool finishes. **Paused** retains the same browser, pinned plan, provider
+thread, and owning Python ledger; resume starts another turn on that same thread.
+It does not freeze the target application's timers, sessions, or remote state.
+Resume asks the agent to inspect run/browser state before continuing. The
+30-minute wall-clock limit includes pauses. Stop is available while paused and
+cleans up the provider/browser. Unconfirmed interruption times out to Stop;
+disconnected sessions fail closed. Resume after closing/restarting the desktop
+is not supported, and saved history does not restore trusted evidence authority.
+Session controls remain visible when inspecting another run. Project switching,
+new runs, plan creation, and report export are blocked during an active session.
 
 The browser preview has **no engine connection and no invented run results**.
 The separate earlier design prototype remains in `/workspace/holoqa-desktop-design`;
@@ -118,6 +131,11 @@ web UI can reopen only already-recorded recent roots. All subsequent plan/run/
 artifact paths are confined to the selected project. Project scripts are never
 executed while discovering files. Scanning stops at depth three / 5,000 files /
 50 plans and ignores dependency/build/run directories and directory symlinks.
+Project metadata reads require bounded regular JSON files. Before starting a
+run or packaging a report, nested storage links/junctions and nonregular files
+are rejected; storage inspection stops at 20,000 entries. This protects normal
+project-folder use and is not a filesystem sandbox against a concurrent hostile
+process changing paths after validation.
 
 Only registered captured artifacts can be previewed, their hashes are checked,
 and the viewer permits inert PNG/JPEG or escaped text. Arbitrary paths, SVG,
@@ -152,20 +170,23 @@ npm run test:ui
 ```
 
 The deterministic Codex peer tests prove initialization, blocking approval
-requests, answer routing, tool dispatch, unknown-request refusal, and process-tree
+requests, answer routing, bounded tool dispatch, pause confirmation, same-thread
+resume, stale-tool/completion refusal, unknown-request refusal, and process-tree
 termination without model calls. Engine tests cover review invalidation, path
 confinement, preservation of in-process capture authority, unverified history,
-UTF-8 stdio and starter-plan creation. The existing engine suite remains required.
+UTF-8 stdio, nested storage confinement, failed-retest preservation, and starter-plan creation. The existing engine suite remains required.
 The UI smoke uses the real Python stdio engine and substitutes only the native
 folder picker/IPC transport. Install Chromium with `npx playwright install chromium`
 first, or set `CHROMIUM_EXECUTABLE` to an existing Chromium executable. The test
-proves that an external plan edit invalidates a reviewed launch before any model
-call occurs; it does not exercise the native WebView2 window.
+proves that an external plan edit invalidates a reviewed launch before provider
+execution. It also exercises approval → pause → resume → pause → stop using the
+real engine and adapter with a deterministic protocol peer. That peer does not
+run shell actions or contact a model. The test does not exercise native WebView2.
 
 A real Windows acceptance pass is still necessary: install the NSIS artifact,
 open a folder containing spaces and non-ASCII characters, sign into a supported
 Codex CLI, exercise both approval choices, run a local fixture, inspect its
-capture, cancel mid-run, and close the window with a provider child alive.
+capture, pause/resume, cancel mid-run, and close the window with a provider child alive.
 CI packaging and a fake peer do not substitute for that interactive test.
 
 This foundation intentionally does not claim agent-assisted plan authoring,
@@ -175,3 +196,6 @@ Starter plans need real assertions edited by the project owner. Run comparisons
 are currently the saved counts shown together; richer per-check diffs follow
 after the first Windows proof. Packaging and provider behavior need validation
 before enabling production use.
+
+Initial provider initialization can hold the session lock until a protocol request
+times out; immediate preflight cancellation remains follow-up work.

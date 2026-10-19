@@ -57,10 +57,19 @@ class CodexSession:
         self.pending: dict[int, Future] = {}
         self.approvals: dict[str, Any] = {}
         self.lock, self.write_lock = threading.RLock(), threading.Lock()
+        self.approval_lock = threading.Lock()
         self.sequence, self.closed = 0, False
         self.thread_id, self.turn_id = "", ""
         self.finished = threading.Event()
         self.turn_status = ""
+        self.disconnected = False
+        self.pausing = False
+        self._starting_turn = False
+        self._early_completions: dict[str, str] = {}
+        self._early_requests: list[dict] = []
+        self._tool_generation = 0
+        self._tool_slots = threading.BoundedSemaphore(8)
+        self._tool_dispatch = threading.Lock()
         self.tools = ThreadPoolExecutor(max_workers=1, thread_name_prefix="holoqa-tools")
         self.job = None
         self.process = subprocess.Popen(
@@ -125,9 +134,77 @@ class CodexSession:
                 "Do not launch another HoloQA MCP process. HoloQA alone computes results.",
         })
         self.thread_id = response["thread"]["id"]
-        result = self.request("turn/start", {"threadId": self.thread_id,
-            "input": [{"type": "text", "text": prompt, "text_elements": []}]})
-        self.turn_id = result["turn"]["id"]
+        self._start_turn(prompt)
+
+    def _start_turn(self, prompt):
+        with self.lock:
+            if self.closed or self.disconnected:
+                raise ProtocolError("Codex connection is closed")
+            self._starting_turn = True
+            self._early_completions.clear()
+            self._early_requests.clear()
+            self.turn_status = ""
+            self.finished.clear()
+            self.pausing = False
+        try:
+            result = self.request("turn/start", {"threadId": self.thread_id,
+                "input": [{"type": "text", "text": prompt, "text_elements": []}]})
+            with self.lock:
+                self.turn_id = result["turn"]["id"]
+                if self.turn_id in self._early_completions:
+                    self.turn_status = self._early_completions[self.turn_id]
+                    self.finished.set()
+                # Switch to normal event routing atomically with assigning the
+                # ID; otherwise a completion between this block and finally
+                # could be buffered and then discarded.
+                self._starting_turn = False
+                self._early_completions.clear()
+                early_requests, self._early_requests = self._early_requests, []
+            # A fast server may request tools before the caller applies the
+            # turn/start reply. Admit them only after validating that reply's ID.
+            for message in early_requests:
+                self.handle(message)
+        finally:
+            with self.lock:
+                self._starting_turn = False
+                self._early_completions.clear()
+                self._early_requests.clear()
+
+    def interrupt(self):
+        """Request interruption; only turn/completed confirms a paused turn."""
+        # An answer already being sent must precede the interruption; an
+        # answer arriving afterward must see pausing and be refused. Keep this
+        # separate from self.lock so close can still kill a stalled pipe.
+        with self.approval_lock:
+            return self._interrupt()
+
+    def _interrupt(self):
+        with self.lock:
+            if self.closed or self.disconnected or self._starting_turn:
+                raise ProtocolError("No active Codex turn to pause")
+            if self.finished.is_set():
+                return False
+            self.pausing = True
+            self._tool_generation += 1
+            approvals = list(self.approvals.items())
+            self.approvals.clear()
+            turn_id = self.turn_id
+        for key, request_id in approvals:
+            self.send({"id": request_id, "result": {"decision": "decline"}})
+            self.emit("approval.resolved", {"id": key})
+        self.request("turn/interrupt", {"threadId": self.thread_id, "turnId": turn_id}, timeout=10)
+        # Drain callbacks accepted before interruption before Engine can resume.
+        with self._tool_dispatch:
+            pass
+        return True
+
+    def resume(self, prompt):
+        """Continue the existing thread only after a confirmed interruption."""
+        with self.lock:
+            if (self.closed or self.disconnected or not self.pausing or
+                    not self.finished.is_set() or self.turn_status != "interrupted"):
+                raise ProtocolError("Codex is not paused on a resumable turn")
+        self._start_turn(prompt)
 
     @property
     def process_cwd(self):
@@ -147,6 +224,7 @@ class CodexSession:
             self.emit("provider.error", {"message": "Codex protocol connection failed. Check CLI compatibility."})
         finally:
             with self.lock:
+                self.disconnected = True
                 for f in list(self.pending.values()):
                     if not f.done():
                         f.set_exception(ProtocolError("Codex disconnected"))
@@ -165,18 +243,38 @@ class CodexSession:
         method, params = message["method"], message.get("params") or {}
         if "id" in message:
             request_id = message["id"]
+            if method in {"item/tool/call", "item/commandExecution/requestApproval"}:
+                with self.lock:
+                    if self._starting_turn and len(self._early_requests) < 8:
+                        self._early_requests.append(message)
+                        return
             if method == "item/tool/call" and self.tool:
-                self.tools.submit(self._tool_reply, request_id, params)
+                with self.lock:
+                    generation = self._tool_generation
+                    accepted = (not self._starting_turn and self._current_turn(params) and
+                                not (self.closed or self.pausing or self.finished.is_set()))
+                    accepted = accepted and self._tool_slots.acquire(blocking=False)
+                    if accepted:
+                        self.tools.submit(self._tool_reply, request_id, params, generation)
+                if not accepted and not self.closed:
+                    self.send({"id": request_id, "result": {"success": False,
+                        "contentItems": [{"type": "inputText", "text": "QA tool is unavailable or busy; retry only during the active turn."}]}})
             elif method == "item/commandExecution/requestApproval":
                 import uuid
                 key = uuid.uuid4().hex
                 with self.lock:
-                    self.approvals[key] = request_id
-                # No session-wide or persistent policy approval is offered.
-                self.emit("approval.request", {"id": key, "command": str(params.get("command") or "")[:6000],
-                    "cwd": params.get("cwd"), "reason": params.get("reason"),
-                    "network": params.get("networkApprovalContext"),
-                    "permissions": params.get("additionalPermissions")})
+                    refuse = (self.closed or self.pausing or self.finished.is_set() or
+                              self._starting_turn or not self._current_turn(params))
+                    if not refuse:
+                        self.approvals[key] = request_id
+                        # Serialize event publication with interrupt/close so a
+                        # stale dialog cannot appear after approvals are cleared.
+                        self.emit("approval.request", {"id": key, "command": str(params.get("command") or "")[:6000],
+                            "cwd": params.get("cwd"), "reason": params.get("reason"),
+                            "network": params.get("networkApprovalContext"),
+                            "permissions": params.get("additionalPermissions")})
+                if refuse and not self.closed:
+                    self.send({"id": request_id, "result": {"decision": "decline"}})
             elif method == "item/fileChange/requestApproval":
                 self.send({"id": request_id, "result": {"decision": "decline"}})
                 self.emit("activity", {"message": "Source edits refused: this is a QA run."})
@@ -185,27 +283,53 @@ class CodexSession:
                     "message": "This desktop does not support that request; no permission granted."}})
                 self.emit("activity", {"message": "Unsupported provider request refused: " + method[:100]})
         elif method == "turn/completed":
-            self.turn_status = params.get("turn", {}).get("status", "unknown")
-            self.finished.set()
+            turn = params.get("turn", {})
+            turn_id = turn.get("id")
+            with self.lock:
+                if params.get("threadId") != self.thread_id or not turn_id:
+                    return
+                if self._starting_turn:
+                    if len(self._early_completions) < 8:
+                        self._early_completions.setdefault(turn_id, turn.get("status", "unknown"))
+                elif turn_id == self.turn_id and not self.finished.is_set():
+                    self.turn_status = turn.get("status", "unknown")
+                    self.finished.set()
         elif method == "item/completed":
             item = params.get("item", {})
             self.emit("activity", {"message": "Codex completed: " + str(item.get("type", "activity"))[:100]})
 
-    def _tool_reply(self, request_id, params):
+    def _current_turn(self, params):
+        return (bool(self.thread_id and self.turn_id) and
+                params.get("threadId") == self.thread_id and params.get("turnId") == self.turn_id)
+
+    def _tool_reply(self, request_id, params, generation):
         try:
-            result = self.tool(params.get("tool", ""), params.get("arguments", {}))
+            with self._tool_dispatch:
+                with self.lock:
+                    if (generation != self._tool_generation or not self._current_turn(params) or self.closed or
+                            self.pausing or self.finished.is_set()):
+                        raise ProtocolError("This QA tool request expired before execution")
+                result = self.tool(params.get("tool", ""), params.get("arguments", {}))
             response = {"success": True, "contentItems": [{"type": "inputText", "text": json.dumps(result)}]}
         except Exception as error:
             response = {"success": False, "contentItems": [{"type": "inputText", "text": str(error)[:3000]}]}
+        finally:
+            self._tool_slots.release()
         try:
             self.send({"id": request_id, "result": response})
         except (OSError, ProtocolError):
             pass
 
     def approve(self, key, decision):
+        with self.approval_lock:
+            return self._approve(key, decision)
+
+    def _approve(self, key, decision):
         if decision not in ("accept", "decline"):
             raise ProtocolError("Only Allow once or Deny is supported")
         with self.lock:
+            if self.closed or self.pausing or self.finished.is_set():
+                raise ProtocolError("Approval expired or the run is paused")
             if key not in self.approvals:
                 raise ProtocolError("Approval expired or already answered")
             request_id = self.approvals.pop(key)

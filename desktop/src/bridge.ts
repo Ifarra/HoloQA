@@ -8,7 +8,7 @@ export interface Observation { file: string; kind: string; sha256?: string }
 export interface Plan { path: string; sha256: string; app: string; target: string; stages: {id: string; title: string}[]; steps: Step[]; warnings: string[] }
 export interface Provider { installed: boolean; authentication: string }
 export interface Hello { protocol: number; recent: string[]; project: Project | null; provider: Provider; browserInstalled: boolean }
-export interface Snapshot { path: string; lifecycle: string; steps: Step[]; status: { run_id: string; total: number; counts: Record<string, number>; pending: string[]; integrity: string; decision: string } }
+export interface Snapshot { path: string; lifecycle: string; session?: {path: string; lifecycle: string} | null; steps: Step[]; status: { run_id: string; total: number; counts: Record<string, number>; pending: string[]; integrity: string; decision: string } }
 export interface Historical { path: string; id: string; app: string; counts: Record<string, number>; decision: string; integrity: string; total: number }
 export interface Approval { id: string; command: string; cwd: string; reason?: string; network?: unknown; permissions?: unknown }
 export async function rpc<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
