@@ -16,4 +16,5 @@ desktop/src-tauri/target/
 desktop/src-tauri/binaries/*.exe
 desktop/src-tauri/binaries/holoqa-desktop-engine-*
 desktop/tsconfig.tsbuildinfo
+desktop/src-tauri/gen/
 .desktop-build/

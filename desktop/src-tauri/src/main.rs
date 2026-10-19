@@ -11,6 +11,39 @@ struct Engine {
     input: Mutex<ChildStdin>,
     pending: Waiters,
     sequence: AtomicU64,
+    #[cfg(windows)]
+    job: WindowsTree,
+}
+
+// Own the sidecar AND browser descendants, not just the Codex subprocess.
+// The engine waits for stdin before launching children, so assignment occurs
+// before its first request. Nested provider Jobs remain contained in this Job.
+#[cfg(windows)]
+struct WindowsTree(usize);
+#[cfg(windows)]
+impl WindowsTree {
+    fn new(child: &Child) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::*;
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
+            let job = Self(handle as usize);
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(handle, JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const _, std::mem::size_of_val(&limits) as u32) == 0
+                || AssignProcessToJobObject(handle, child.as_raw_handle()) == 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            Ok(job)
+        }
+    }
+    fn terminate(&self) { unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0 as _, 130); } }
+}
+#[cfg(windows)]
+impl Drop for WindowsTree {
+    fn drop(&mut self) { unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0 as _); } }
 }
 
 impl Engine {
@@ -20,7 +53,7 @@ impl Engine {
         #[cfg(debug_assertions)]
         let mut command = {
             // Only developer builds accept an interpreter override. Release uses
-            // the signed/bundled sidecar next to the desktop executable.
+            // the bundled sidecar next to the desktop executable.
             if let Some(python) = std::env::var_os("HOLOQA_DESKTOP_PYTHON") {
                 let mut cmd = Command::new(python);
                 cmd.args(["-m", "holoqa.desktop"]);
@@ -44,6 +77,11 @@ impl Engine {
             command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
         let mut child = command.spawn().map_err(|e| format!("Cannot start HoloQA engine: {e}"))?;
+        #[cfg(windows)]
+        let job = WindowsTree::new(&child).map_err(|e| {
+            let _ = child.kill(); let _ = child.wait();
+            format!("Cannot own the Windows engine process tree: {e}")
+        })?;
         let input = child.stdin.take().ok_or("Missing engine input")?;
         let output = child.stdout.take().ok_or("Missing engine output")?;
         let pending: Waiters = Arc::new(Mutex::new(HashMap::new()));
@@ -70,7 +108,8 @@ impl Engine {
             waiters.lock().unwrap().clear();
             let _ = handle.emit("engine-event", json!({"event":"engine.disconnected","data":{}}));
         });
-        Ok(Self {child:Mutex::new(child),input:Mutex::new(input),pending,sequence:AtomicU64::new(0)})
+        Ok(Self {child:Mutex::new(child),input:Mutex::new(input),pending,sequence:AtomicU64::new(0),
+            #[cfg(windows)] job})
     }
 
     fn request(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -104,6 +143,8 @@ impl Engine {
                 std::thread::sleep(Duration::from_millis(100));
             }
             let _ = child.kill();
+            #[cfg(windows)]
+            self.job.terminate();
             let _ = child.wait();
         }
     }

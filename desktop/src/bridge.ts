@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 
 export const native = isTauri();
 export interface Project { name: string; path: string; framework: string; plans: string[]; scanLimited: boolean }
-export interface Step { id: string; stage: string; title: string; do?: string; route?: string; expect?: Record<string, unknown>[]; depends_on?: string[]; verdict?: string; note?: string; observations?: Observation[]; assertions?: unknown[] }
+export interface Step { id: string; stage: string; title: string; do?: string; route?: string; expect?: Record<string, unknown>[]; depends_on?: string[]; requires?: Record<string,unknown>[]; blocked_if?:string; actor?:string; strength?:string; weak_reason?:string; verdict?: string; note?: string; observations?: Observation[]; assertions?: unknown[] }
 export interface Observation { file: string; kind: string; sha256?: string }
 export interface Plan { path: string; sha256: string; app: string; target: string; stages: {id: string; title: string}[]; steps: Step[]; warnings: string[] }
 export interface Provider { installed: boolean; authentication: string }

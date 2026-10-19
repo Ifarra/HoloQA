@@ -97,7 +97,10 @@ class CodexSession:
             self.pending[request_id] = future
         try:
             self.send({"id": request_id, "method": method, "params": params or {}})
-            return future.result(timeout=timeout)
+            try:
+                return future.result(timeout=timeout)
+            except TimeoutError as error:
+                raise ProtocolError("Codex did not respond in time. Check CLI compatibility and sign-in, then retry.") from error
         finally:
             with self.lock:
                 self.pending.pop(request_id, None)

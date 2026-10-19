@@ -1,4 +1,7 @@
 name: Windows desktop
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
 on:
   workflow_dispatch:
   pull_request:
@@ -28,6 +31,12 @@ jobs:
         run: npm ci
       - name: Build bundled engine
         run: uv run python desktop/scripts/build_engine.py
+      - name: Browser test runtime
+        working-directory: desktop
+        run: npx playwright install chromium
+      - name: React UI with real Python engine
+        working-directory: desktop
+        run: npm run test:ui
       - name: Packaged engine smoke
         run: uv run python desktop/scripts/smoke_engine.py desktop/src-tauri/binaries/holoqa-desktop-engine-x86_64-pc-windows-msvc.exe
       - name: Build Windows installer

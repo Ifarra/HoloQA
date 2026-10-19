@@ -43,6 +43,7 @@ class Engine:
         self.root: Path | None = None
         self.reviews: dict[str, tuple] = {}
         self.run: Run | None = None
+        self.run_states: dict[str, str] = {}
         self.provider: CodexSession | None = None
         self.lifecycle = "idle"
         self.lock = threading.RLock()
@@ -51,6 +52,27 @@ class Engine:
         self.deadline = 0.0
         self.closing = False
         self.provider_status = {"installed": bool(shutil.which("codex")), "authentication": "unchecked"}
+
+    @property
+    def lifecycle(self):
+        return self._lifecycle
+
+    @lifecycle.setter
+    def lifecycle(self, value):
+        self._lifecycle = value
+        if self.run:
+            self.run_states[str(self.run.dir)] = value
+
+    def run_state(self, run):
+        return self.run_states.get(str(run.dir), "historical")
+
+    def gated_status(self, run):
+        status = run.status(run.pinned_plan())
+        # Proven assertions and a completed provider lifecycle are separate.
+        # Never display RELEASE while running, interrupted, or failed.
+        if self.run_state(run) in {"starting", "running", "stopping", "interrupted", "failed"}:
+            status["decision"] = "HOLD"
+        return status
 
     def recent(self):
         try:
@@ -252,6 +274,7 @@ class Engine:
                     if errors:
                         self.emit("activity", {"message": "Browser cleanup needs attention"})
             self.provider = None
+            self.emit("approvals.cleared", {})
             self.emit("run.updated", {})
 
     def stop(self):
@@ -277,7 +300,7 @@ class Engine:
                 if not run.dir.is_relative_to(self.root):
                     continue
                 try:
-                    status = run.status(run.pinned_plan())
+                    status = self.gated_status(run)
                     result.append({"path": str(run.dir.relative_to(self.root)),
                         "id": run_id, "app": status["app"], "counts": status["counts"],
                         "decision": status["decision"], "integrity": status["integrity"],
@@ -300,19 +323,20 @@ class Engine:
             return None
         with self.tool_lock:
             run = self.selected_run(path)
-            status = run.status(run.pinned_plan())
+            status = self.gated_status(run)
             # Captured variable values are deliberately excluded from the UI.
             status.pop("vars", None)
             data = run.read()
             return {"status": status, "path": str(run.dir.relative_to(self.root)),
                     "steps": list(data["steps"].values()),
-                    "lifecycle": self.lifecycle if self.run and self.run.dir == run.dir else "historical"}
+                    "lifecycle": self.run_state(run)}
 
     def artifact(self, path, file):
         run = self.selected_run(path)
         candidate = (run.evidence_dir / file).resolve()
         known = {o["file"] for s in run.read()["steps"].values() for o in s.get("observations", [])}
-        if file not in known or not candidate.is_relative_to(run.evidence_dir.resolve()):
+        if (file not in known or not candidate.is_relative_to(run.evidence_dir.resolve())
+                or not candidate.is_relative_to(self.root)):
             raise DesktopError("Only captured artifacts inside this run can be viewed")
         if not candidate.is_file() or candidate.stat().st_size > 4 * LIMIT:
             raise DesktopError("Artifact missing or too large for the inline viewer")
@@ -325,12 +349,16 @@ class Engine:
             return {"image": "data:image/png;base64," + base64.b64encode(contents).decode()}
         if contents.startswith(b"\xff\xd8\xff"):
             return {"image": "data:image/jpeg;base64," + base64.b64encode(contents).decode()}
-        return {"text": contents.decode("utf-8", errors="replace")}
+        text = contents.decode("utf-8", errors="replace")
+        if len(text) > 200_000:
+            text = text[:200_000] + "\n[Preview truncated; inspect the original artifact for the full capture.]"
+        return {"text": text}
 
     def dispatch(self, method, params):
         if method == "hello":
             return {"protocol": PROTOCOL, "recent": self.recent(), "project": self.project(),
-                    "provider": self.provider_status, "browserInstalled": bool(shutil.which("agent-browser"))}
+                    "provider": self.provider_status, "browserInstalled": bool(shutil.which("agent-browser")),
+                    "qaTools": [tool["name"] for tool in self._specs()]}
         if method == "run.stop":
             return self.stop()
         if method == "approval.respond":
@@ -370,13 +398,21 @@ class Engine:
                 return self.artifact(params["path"], params["file"])
             if method == "run.export":
                 self._idle()
+                selected = self.selected_run(params.get("path", ""))
+                if self.run_state(selected) in {"interrupted", "failed"}:
+                    raise DesktopError("This provider run did not complete. Inspect its evidence or start a new run before exporting.")
                 # Workbooks are outside this milestone; do not follow a plan path.
-                result = report.package(self.selected_run(params.get("path", "")))
+                result = report.package(selected)
                 return {"message": "Report saved in the run's out folder", "result": result}
             raise DesktopError("Unsupported desktop method")
 
 
 def main():
+    # Windows pipes otherwise inherit a legacy console code page. The Rust
+    # transport and Codex protocol are UTF-8 regardless of the user's locale.
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="strict")
     parser = argparse.ArgumentParser()
     parser.add_argument("--state-dir", type=Path, required=True)
     args = parser.parse_args()

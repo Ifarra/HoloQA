@@ -101,6 +101,13 @@ def test_tools_remain_in_owning_engine_and_restart_cannot_authorize_release(engi
     monkeypatch.setattr(observe, "dom", dom)
     captured = engine.tool("holoqa_observe", {"step_id":"A1", "kind":"dom"})
     engine.tool("holoqa_judge", {"step_id":"A1"})
+    assert engine.snapshot()["status"]["decision"] == "HOLD", "Active provider is not a completed release"
+    engine.lifecycle = "failed"
+    assert engine.snapshot()["status"]["decision"] == "HOLD"
+    assert engine.history()[0]["decision"] == "HOLD"
+    with pytest.raises(DesktopError, match="did not complete"):
+        engine.dispatch("run.export", {})
+    engine.lifecycle = "completed"
     snapshot = engine.snapshot()
     assert snapshot["status"]["decision"] == "RELEASE"
     assert snapshot["status"]["integrity"] == "verified"
@@ -115,7 +122,8 @@ def test_tools_remain_in_owning_engine_and_restart_cannot_authorize_release(engi
 
 
 def test_tool_arguments_cannot_redirect_run_or_author_a_verdict(engine):
-    engine.run = object()
+    plan, _ = engine.load_plan("holoqa.plan.yaml")
+    engine.run = workspace.workspace_for(plan, root=engine.root / ".holoqa").start_run(plan)
     engine.lifecycle = "running"
     specs = engine._specs()
     for tool in specs:
@@ -125,7 +133,6 @@ def test_tool_arguments_cannot_redirect_run_or_author_a_verdict(engine):
         engine.tool("holoqa_block", {"step_id":"A1","reason":"x","run_dir":"outside"})
     with pytest.raises(DesktopError):
         engine.tool("holoqa_run_start", {})
-    engine.run = None
 
 
 def test_only_captured_artifacts_can_be_read(engine):
@@ -160,3 +167,45 @@ def test_stdio_discovery_and_shutdown_are_protocol_only(tmp_path):
     assert results[1]["result"]["protocol"] == 1
     assert results[2]["result"]["name"] == project.name
     assert not list(project.iterdir())
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_engine_launch_approval_and_stop_with_real_appserver_transport(engine, monkeypatch, tmp_path, cancel):
+    from tests.test_desktop_codex import PEER
+    peer = tmp_path / "app server.py"
+    peer.write_text(PEER, encoding="utf-8")
+    session_type = desktop.CodexSession
+    monkeypatch.setattr(desktop, "CodexSession", lambda cwd, emit, tool=None:
+        session_type(cwd, emit, tool, command=[sys.executable, "-u", str(peer)]))
+    original_which = desktop.shutil.which
+    monkeypatch.setattr(desktop.shutil, "which", lambda name:
+        "/fixture/agent-browser" if name == "agent-browser" else original_which(name))
+    ready = threading.Event()
+    events = []
+    def emit(event, data):
+        events.append((event, data))
+        if event == "approval.request":
+            ready.set()
+    engine.emit = emit
+    summary = engine.load_plan("holoqa.plan.yaml")[1]
+    token = engine.review(summary["path"], summary["sha256"])["token"]
+    result = engine.start(token)
+    assert result["status"]["decision"] == "HOLD"
+    assert ready.wait(5)
+    with pytest.raises(DesktopError, match="active run"):
+        engine.open_project(str(engine.root.parent))
+    if cancel:
+        engine.stop()
+        assert engine.lifecycle == "interrupted"
+        assert any(event == "approvals.cleared" for event, _ in events)
+    else:
+        key = next(data["id"] for event, data in events if event == "approval.request")
+        engine.dispatch("approval.respond", {"id": key, "decision": "decline"})
+    engine.worker.join(timeout=5)
+    assert not engine.worker.is_alive()
+    snapshot = engine.snapshot()
+    assert snapshot["status"]["decision"] == "HOLD"
+    assert snapshot["lifecycle"] == ("interrupted" if cancel else "completed")
+    if not cancel:
+        assert snapshot["status"]["counts"]["BLOCKED"] == 1
+    assert len(engine.history()) == 1

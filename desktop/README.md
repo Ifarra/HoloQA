@@ -45,6 +45,10 @@ npm run desktop:dev
 
 The development interpreter override is disabled in release builds. Release
 builds launch the bundled engine alongside the installed desktop executable.
+`desktop:dev` loads the development config without an external-binary packaging
+requirement, so iterating against the interpreter does not require rebuilding
+the PyInstaller executable. The development CSP permits Vite's loopback HMR;
+the release CSP permits only packaged scripts and the native IPC transport.
 
 For QA, install and sign into your own Codex CLI in the same Windows user account.
 The adapter baseline is **codex-cli 0.159.2**. This uses its experimental dynamic
@@ -128,6 +132,9 @@ Explicit stop kills the provider tree, waits for in-flight bounded tool calls,
 then cleans up browser sessions. The native exit handler requests sidecar
 shutdown before terminating it; if that process dies, Windows closes its Job
 handle and terminates the provider tree. Navigation never restarts the sidecar.
+The native shell additionally owns the sidecar and all browser descendants in
+an outer kill-on-close Job. If graceful cleanup exceeds its exit deadline, this
+outer Job terminates the whole remaining tree instead of leaving a browser alive.
 
 The desktop does not attest historical runs or promote saved JSON to trusted
 state. For this milestone human attestation remains an explicit engine CLI
@@ -141,6 +148,7 @@ uv run pytest -q
 uv run holoqa selftest
 cd desktop
 npm run build
+npm run test:ui
 ```
 
 The deterministic Codex peer tests prove initialization, blocking approval
@@ -148,6 +156,11 @@ requests, answer routing, tool dispatch, unknown-request refusal, and process-tr
 termination without model calls. Engine tests cover review invalidation, path
 confinement, preservation of in-process capture authority, unverified history,
 UTF-8 stdio and starter-plan creation. The existing engine suite remains required.
+The UI smoke uses the real Python stdio engine and substitutes only the native
+folder picker/IPC transport. Install Chromium with `npx playwright install chromium`
+first, or set `CHROMIUM_EXECUTABLE` to an existing Chromium executable. The test
+proves that an external plan edit invalidates a reviewed launch before any model
+call occurs; it does not exercise the native WebView2 window.
 
 A real Windows acceptance pass is still necessary: install the NSIS artifact,
 open a folder containing spaces and non-ASCII characters, sign into a supported

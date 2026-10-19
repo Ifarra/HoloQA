@@ -7,7 +7,7 @@ import tempfile
 
 with tempfile.TemporaryDirectory(prefix="holoqa-desktop-") as temp:
     root = Path(temp)
-    project = root / "project with spaces"
+    project = root / "project é with spaces"
     project.mkdir()
     process = subprocess.run([sys.argv[1], "--state-dir", str(root / "state")],
         input="\n".join(json.dumps(item) for item in [
@@ -18,6 +18,8 @@ with tempfile.TemporaryDirectory(prefix="holoqa-desktop-") as temp:
     messages = [json.loads(line) for line in process.stdout.splitlines()]
     by_id = {message["id"]: message for message in messages if "id" in message}
     assert by_id[1]["result"]["protocol"] == 1
+    assert "holoqa_observe" in by_id[1]["result"]["qaTools"]
+    assert "holoqa_judge" in by_id[1]["result"]["qaTools"]
     assert by_id[2]["result"]["name"] == project.name
     assert not list(project.iterdir()), "Discovery must not write to the project"
-    print("Packaged Windows engine smoke passed")
+    print("Packaged engine smoke passed")
