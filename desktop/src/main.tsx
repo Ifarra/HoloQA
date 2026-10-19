@@ -68,7 +68,7 @@ function App() {
   useEffect(()=>{setArtifact(null);},[selected,snapshot?.path]);
 
   const navigate=(id:Page)=>{if(id==='run'){currentPath.current='';void refreshRun().catch(e=>setError(errorText(e)));}setPage(id);};
-  const loadPlan=async(path:string)=>{const p=await rpc<Plan>('plan.load',{path});setPlan(p);setReviewed(false);setReviewToken('');setTarget(p.target);};
+  const loadPlan=async(path:string)=>{setReviewed(false);setReviewToken('');const p=await rpc<Plan>('plan.load',{path});setPlan(p);setTarget(p.target);};
   const adoptProject=async(p:Project)=>{
     projectEpoch.current++;currentPath.current='';setProject(p);setPlan(null);setSnapshot(null);setHistory([]);setSelected('');setArtifact(null);setReviewed(false);setReviewToken('');setActivity([]);setAppName(p.name.replace(/[^a-zA-Z0-9_-]/g,'-'));setPage('overview');
     setRecent(r=>[p.path,...r.filter(v=>v!==p.path)].slice(0,12));

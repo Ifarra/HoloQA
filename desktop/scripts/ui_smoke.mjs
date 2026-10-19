@@ -64,6 +64,7 @@ try {
   await page.getByRole('dialog').getByRole('button',{name:'Start run',exact:true}).click();
   await page.getByRole('alert').filter({hasText:'changed'}).waitFor();
   await page.getByRole('button',{name:'Reload',exact:false}).click();
+  await page.getByText('"text_contains": "Changed"',{exact:false}).waitFor();
   assert.equal(await page.getByRole('checkbox').isChecked(),false);
   await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Run history',exact:true}).click();
   await page.getByRole('heading',{name:'No saved runs yet.'}).waitFor();
