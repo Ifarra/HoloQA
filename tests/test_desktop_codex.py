@@ -389,3 +389,18 @@ def test_approval_answer_cannot_be_sent_after_interruption(tmp_path, monkeypatch
         release.set()
         writer.join(3); pauser.join(3)
         codex.close()
+
+
+@pytest.mark.parametrize('command', ['x' * 6001, '', None])
+def test_command_that_cannot_be_fully_reviewed_is_declined(tmp_path, monkeypatch, command):
+    events, replies = [], []
+    codex = session(tmp_path, lambda event, data: events.append((event, data)))
+    codex.thread_id, codex.turn_id = 'thread-1', 'turn-1'
+    monkeypatch.setattr(codex, 'send', replies.append)
+    try:
+        codex.handle({'id': 900, 'method': 'item/commandExecution/requestApproval',
+                      'params': {'threadId': 'thread-1', 'turnId': 'turn-1', 'command': command}})
+        assert replies == [{'id': 900, 'result': {'decision': 'decline'}}]
+        assert not events and not codex.approvals
+    finally:
+        codex.close()

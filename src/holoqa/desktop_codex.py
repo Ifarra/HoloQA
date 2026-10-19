@@ -262,14 +262,16 @@ class CodexSession:
             elif method == "item/commandExecution/requestApproval":
                 import uuid
                 key = uuid.uuid4().hex
+                command = params.get("command")
                 with self.lock:
                     refuse = (self.closed or self.pausing or self.finished.is_set() or
-                              self._starting_turn or not self._current_turn(params))
+                              self._starting_turn or not self._current_turn(params) or
+                              not isinstance(command, str) or not command.strip() or len(command) > 6000)
                     if not refuse:
                         self.approvals[key] = request_id
                         # Serialize event publication with interrupt/close so a
                         # stale dialog cannot appear after approvals are cleared.
-                        self.emit("approval.request", {"id": key, "command": str(params.get("command") or "")[:6000],
+                        self.emit("approval.request", {"id": key, "command": command,
                             "cwd": params.get("cwd"), "reason": params.get("reason"),
                             "network": params.get("networkApprovalContext"),
                             "permissions": params.get("additionalPermissions")})
