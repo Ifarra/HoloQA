@@ -35,7 +35,8 @@ def test_utf8_document_uses_owned_extractor_and_preserves_snapshot(tmp_path, ext
 
 @pytest.mark.parametrize('data,code', [(b'\xff\xfe', 'encoding'), (b'', 'no_text'),
                                        (b'plain\x00binary', 'binary_content'),
-                                       (b'a' * (documents.MAX_TEXT + 1), 'text_limit')])
+                                       (b'a' * (documents.MAX_TEXT + 1), 'text_limit')],
+                         ids=['encoding', 'empty', 'binary', 'text-limit'])
 def test_invalid_text_is_actionable_without_source_contents(tmp_path, data, code):
     path = document(tmp_path, 'sensitive-customer-name.txt', data)
     with pytest.raises(DocumentError) as error:
@@ -230,3 +231,13 @@ def test_compressed_pdf_stream_expansion_is_bounded(tmp_path):
     assert source.stat().st_size < 5 * 1024 * 1024
     with pytest.raises(DocumentError):
         read_document(str(source))
+
+
+@pytest.mark.parametrize('extension',['txt','pdf'])
+def test_cold_worker_never_writes_shared_bytecode(tmp_path, monkeypatch, extension):
+    source=pdf(tmp_path) if extension=='pdf' else document(tmp_path,'cold.txt',b'Cold requirements')
+    cache=tmp_path/'cold-bytecode'
+    monkeypatch.setenv('PYTHONPYCACHEPREFIX',str(cache))
+    result=read_document(source)
+    assert result['characters'] > 0
+    assert not list(cache.rglob('*.pyc'))

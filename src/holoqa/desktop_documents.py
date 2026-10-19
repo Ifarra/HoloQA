@@ -39,7 +39,7 @@ class DocumentCancelled(DocumentError):
 def _worker_command(path: str) -> list[str]:
     if getattr(sys, 'frozen', False):
         return [sys.executable, '--extract-document', path]
-    return [sys.executable, '-m', 'holoqa.desktop_documents', '--extract', path]
+    return [sys.executable, '-B', '-m', 'holoqa.desktop_documents', '--extract', path]
 
 
 def read_document(path: str, *, cancel: threading.Event | None = None,
@@ -141,6 +141,8 @@ def _worker_limits():
 def extract_main(path: str) -> int:
     """Worker entrypoint; frozen desktop dispatches --extract-document here."""
     try:
+        # Resource-limited parsers must not create truncated shared .pyc files.
+        sys.dont_write_bytecode = True
         _worker_limits()
         response = {'result': _read_document(path)}
     except DocumentError as error:
