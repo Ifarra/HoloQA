@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#09080f">
+  <meta name="description" content="HoloQA is an evidence-backed QA workspace for your project and your coding agent. Open a folder, review a plan, and run supervised browser checks with Codex.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <meta property="og:title" content="HoloQA — Every check, backed by evidence.">
+  <meta property="og:description" content="Your project. Your agent. An evidence-backed QA workspace for Windows.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://ifarra.github.io/HoloQA/">
+  <meta property="og:image" content="https://ifarra.github.io/HoloQA/assets/studio-overview.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://ifarra.github.io/HoloQA/">
+  <link rel="icon" type="image/png" href="assets/icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+  <title>HoloQA — Every check, backed by evidence.</title>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-glow" aria-hidden="true"></div>
+  <header class="site-header wrap">
+    <a class="brand" href="#" aria-label="HoloQA home"><img src="assets/icon.png" width="32" height="32" alt=""><span>HoloQA<span class="brand-dot">.</span></span></a>
+    <button class="menu-toggle" aria-controls="navigation" aria-expanded="false" aria-label="Open navigation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <nav id="navigation" aria-label="Main navigation">
+      <a href="#workflow">How it works</a><a href="#studio">Inside Studio</a><a href="#questions">Questions</a>
+      <a class="nav-github" href="https://github.com/Ifarra/HoloQA">GitHub <span aria-hidden="true">↗</span></a>
+    </nav>
+    <a class="button small header-download" data-download href="https://github.com/Ifarra/HoloQA/releases/download/desktop-v0.1.1/HoloQA-Desktop-0.1.1-windows-x64-setup.exe">Download <span aria-hidden="true">↗</span></a>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-heading">
+        <a class="release-pill" href="https://github.com/Ifarra/HoloQA/releases" data-release-link><span class="status-dot"></span><span data-version>v0.1.1 Preview</span><span class="pill-divider"></span>Windows x64 <span aria-hidden="true">↗</span></a>
+        <h1 id="hero-title">Every check.<br><span>Backed by evidence.</span></h1>
+        <div class="hero-signature"><span class="tiny-star" aria-hidden="true">✦</span> YOUR PROJECT. YOUR AGENT.</div>
+      </div>
+      <div class="hero-copy">
+        <p>Turn your project folder into a QA workspace. Review the plan, bring your Codex, and inspect the evidence behind every result.</p>
+        <a class="button" data-download href="https://github.com/Ifarra/HoloQA/releases/download/desktop-v0.1.1/HoloQA-Desktop-0.1.1-windows-x64-setup.exe"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5l8-1v8H3zm10-1l8-1v9h-8zM3 14h8v8l-8-1zm10 0h8v9l-8-1z" class="filled"/></svg>Download for Windows <span aria-hidden="true">↗</span></a>
+        <p class="download-note">Free & MIT licensed <span>·</span> Unsigned preview</p>
+        <a class="text-link" href="#workflow">See how it works <span aria-hidden="true">↓</span></a>
+      </div>
+    </section>
+
+    <section class="studio-showcase wrap" id="studio" aria-labelledby="studio-title">
+      <div class="window-topline"><span id="studio-title"><span class="status-dot"></span> HOLOQA STUDIO</span><span class="topline-note">A familiar place for a different kind of confidence.</span><span class="window-counter">01 / 04</span></div>
+      <figure class="studio-window">
+        <div class="window-bar"><span class="window-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v11H3zM3 7V4h7l2 3"/></svg> Local workspace</span><div class="view-tabs" role="tablist" aria-label="Desktop views"><button role="tab" id="view-overview" aria-controls="studio-panel" aria-selected="true" data-view="overview">Overview</button><button role="tab" id="view-paused" aria-controls="studio-panel" aria-selected="false" tabindex="-1" data-view="paused">Paused run</button></div><span class="desktop-caption">DESKTOP / WINDOWS</span></div>
+        <div id="studio-panel" role="tabpanel" aria-labelledby="view-overview" tabindex="0"><div class="screen-crop"><img id="studio-image" src="assets/studio-overview.png" width="1440" height="1050" fetchpriority="high" alt="HoloQA desktop overview with plan coverage, saved-run history, and project readiness for an example storefront project."></div><button class="expand-view" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg> Expand view</button></div>
+        <figcaption><span><span class="caption-dot"></span> Actual desktop interface · example project</span><span>Local files. Existing agent sign-in. Your control.</span></figcaption>
+      </figure>
+      <div class="principles"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v11H3zM3 7V4h7l2 3"/></svg> Starts with a folder</span><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7L3 12l5 5m8-10l5 5-5 5m-3-14l-2 18"/></svg> Uses your Codex CLI</span><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4v5c0 5-8 9-8 9s-8-4-8-9V7zM8 12l3 3 5-6"/></svg> Engine-computed results</span><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 9h8m-8 4h5"/></svg> Evidence you can inspect</span></div>
+    </section>
+
+    <section class="section wrap workflow-section" id="workflow" aria-labelledby="workflow-title">
+      <div class="section-heading"><div><span class="eyebrow">01 — FROM PROJECT TO PROOF</span><h2 id="workflow-title">Your workflow.<br>A little more certain.</h2></div><p>No project import. No new provider account.<br>Start where your code already lives.</p></div>
+      <div class="workflow-grid">
+        <div class="steps" role="tablist" aria-label="Explore the QA workflow" aria-orientation="vertical">
+          <button class="step" role="tab" id="step-project" aria-selected="true" aria-controls="workflow-panel" data-step="project"><span class="step-number">01</span><span><strong>Open your project</strong><small>Choose a local folder. Keep your files where they are.</small></span><span class="step-arrow" aria-hidden="true">↗</span></button>
+          <button class="step" role="tab" id="step-plan" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-step="plan"><span class="step-number">02</span><span><strong>Review what matters</strong><small>Read the checks, expectations, and target before a run.</small></span><span class="step-arrow" aria-hidden="true">↗</span></button>
+          <button class="step" role="tab" id="step-agent" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-step="agent"><span class="step-number">03</span><span><strong>Run with your agent</strong><small>Let Codex exercise the app. Approve commands one at a time.</small></span><span class="step-arrow" aria-hidden="true">↗</span></button>
+          <button class="step" role="tab" id="step-evidence" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-step="evidence"><span class="step-number">04</span><span><strong>Inspect the evidence</strong><small>Follow each result back to captures and assertions.</small></span><span class="step-arrow" aria-hidden="true">↗</span></button>
+        </div>
+        <div class="workflow-preview" id="workflow-panel" role="tabpanel" aria-labelledby="step-project" tabindex="0">
+          <div class="preview-top"><span class="mini-label">THE WORKSPACE</span><span class="badge">Illustrative tour</span></div>
+          <div class="tour-scene" id="tour-project"><div class="tour-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v11H3zM3 7V4h7l2 3"/></svg></div><h3>A folder is a starting point.</h3><p>HoloQA discovers plans without running your project scripts.</p><div class="file-tree"><div><span>⌄</span> storefront <span class="tree-tag">LOCAL</span></div><div class="file indent">├ &nbsp; src/</div><div class="file indent selected-file">├ &nbsp; holoqa.plan.yaml <span>Discovered</span></div><div class="file indent">└ &nbsp; .holoqa/ <span>Runs & evidence</span></div></div><div class="preview-note"><span class="status-dot"></span> No account or project import required.</div></div>
+          <div class="tour-scene" id="tour-plan" hidden><div class="tour-icon coral"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H5v17h14V4h-3M9 3h6v4H9zM8 12h8m-8 4h5"/></svg></div><h3>Make the intent explicit.</h3><p>Review the entire plan and its target. An edit requires a fresh review.</p><div class="sample-plan"><span class="mini-label">EXAMPLE CHECK · CHECKOUT</span><h4>Order confirmation is visible</h4><div class="code-lines"><span>expect:</span><br>&nbsp; - <b>text_contains:</b> "Order confirmed"</div><div class="plan-target"><span>Target</span><code>http://localhost:3000</code></div></div><div class="preview-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l4 4L19 6"/></svg> Your review is bound to the exact plan.</div></div>
+          <div class="tour-scene" id="tour-agent" hidden><div class="tour-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7L3 12l5 5m8-10l5 5-5 5m-3-14l-2 18"/></svg></div><h3>Your agent. Your permission.</h3><p>Use your existing Codex sign-in. Command requests come back to you.</p><div class="approval-example"><span class="approval-heading"><span class="status-dot"></span> COMMAND APPROVAL</span><code>curl -I http://localhost:3000</code><p>Example command request. No persistent permission is granted.</p><div class="example-controls" aria-label="Illustrated approval choices"><span>Deny</span><span class="example-allow">Allow once ↗</span><span>Stop run</span></div></div><div class="preview-note">Source-edit requests are refused during QA.</div></div>
+          <div class="tour-scene" id="tour-evidence" hidden><div class="tour-icon blue"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4v5c0 5-8 9-8 9s-8-4-8-9V7zM8 12l3 3 5-6"/></svg></div><h3>Give every result a trail.</h3><p>HoloQA evaluates captured evidence. Your agent cannot write its own PASS.</p><div class="evidence-chain"><div><span class="chain-number">01</span><span><strong>Capture</strong><small>Browser observations</small></span><span aria-hidden="true">↗</span></div><div><span class="chain-number">02</span><span><strong>Evaluate</strong><small>Plan assertions & integrity</small></span><span aria-hidden="true">↗</span></div><div><span class="chain-number">03</span><span><strong>Inspect</strong><small>Results, artifacts & report</small></span><span aria-hidden="true">↗</span></div></div><div class="preview-note"><span class="status-dot"></span> The engine computes the decision.</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap features-section" aria-labelledby="features-title">
+      <div class="section-heading"><div><span class="eyebrow">02 — BUILT FOR SUPERVISION</span><h2 id="features-title">Let the agent work.<br>Keep your bearings.</h2></div><a class="text-link" href="https://github.com/Ifarra/HoloQA/blob/main/desktop/README.md">Read the desktop guide <span aria-hidden="true">↗</span></a></div>
+      <div class="feature-grid">
+        <article class="feature-card evidence-feature"><span class="feature-kicker"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4v5c0 5-8 9-8 9s-8-4-8-9V7zM8 12l3 3 5-6"/></svg> EVIDENCE FIRST</span><h3>The result comes<br>with its reasoning.</h3><p>Inspect the captured artifacts, assertion details, and integrity status behind your checks. Export a report from the engine.</p><div class="verdict-flow" aria-label="Reviewed plan and captured evidence lead to an engine-computed decision"><span>Reviewed plan</span><span aria-hidden="true">+</span><span>Captured evidence</span><span aria-hidden="true">→</span><strong>Engine decision <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l4 4L19 6"/></svg></strong></div></article>
+        <article class="feature-card pause-feature"><div class="pause-symbol" aria-hidden="true"><span></span><span></span></div><span class="feature-kicker">ROOM TO THINK</span><h3>Pause the run.<br>Keep the context.</h3><p>Interrupt Codex, inspect what happened, then continue with the same browser, pinned plan, and evidence owner.</p><span class="feature-footnote">Resume within the same live desktop session.</span></article>
+        <article class="feature-card local-feature"><div><span class="feature-kicker"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v12H4zm5 16h6m-3-4v4"/></svg> YOUR WORKSPACE, IN PLACE</span><h3>Local files.<br>A history you can revisit.</h3><p>Plans and saved runs stay in your project. Keep earlier runs when you retest and inspect their evidence with its integrity status.</p></div><div class="storage-map"><div class="storage-root"><span class="status-dot"></span> your-project /</div><div><span class="storage-branch">├</span><code>holoqa.plan.yaml</code><span>Your plan</span></div><div><span class="storage-branch">└</span><code>.holoqa/</code><span>Runs · captures · reports</span></div><small>Model requests follow your configured provider’s data handling.</small></div></article>
+      </div>
+    </section>
+
+    <section class="section wrap start-section" id="get-started" aria-labelledby="start-title">
+      <div class="start-copy"><span class="eyebrow">03 — MAKE IT YOUR WORKSPACE</span><h2 id="start-title">Your first run starts<br>with your project.</h2><p>Install the desktop, connect your existing Codex CLI, and give your application a plan worth checking.</p><a class="button" data-download href="https://github.com/Ifarra/HoloQA/releases/download/desktop-v0.1.1/HoloQA-Desktop-0.1.1-windows-x64-setup.exe">Get HoloQA for Windows <span aria-hidden="true">↗</span></a><div class="install-meta"><span data-version>v0.1.1 Preview</span><span>Windows x64</span><a href="https://github.com/Ifarra/HoloQA/releases" data-release-link>Release notes ↗</a></div></div>
+      <div class="setup-card"><div class="setup-heading"><span class="square-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6l5 6-5 6m7 0h7"/></svg></span><span>Before your first run<small>YOUR EXISTING TOOLS</small></span><button class="copy-command" aria-label="Copy setup commands"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h12v13H8zM16 8V3H3v13h5"/></svg>Copy</button></div><pre><code id="setup-commands"># Sign in to your installed Codex CLI
+codex login
+
+# Install the QA browser driver & runtime
+npm install -g agent-browser
+agent-browser install</code></pre><div class="setup-footer"><span>Then start your app and open its folder.</span><a href="https://github.com/Ifarra/HoloQA/blob/main/desktop/README.md">Full setup guide ↗</a></div><p class="setup-baseline">Codex protocol baseline: 0.159.2. Python engine included in the installer.</p></div>
+    </section>
+
+    <section class="section wrap faq-section" id="questions" aria-labelledby="questions-title"><div><span class="eyebrow">04 — A FEW GOOD QUESTIONS</span><h2 id="questions-title">Before you<br>open that folder.</h2><p>The details that matter for<br>your first run.</p></div><div class="questions"><details><summary>Which coding agents can I use?<span aria-hidden="true">+</span></summary><p>The current desktop preview supports your installed Codex CLI and its existing sign-in. The app-server protocol baseline is Codex 0.159.2. Other desktop agent adapters are planned. The underlying HoloQA engine also provides CLI, MCP, and TUI workflows; see the <a href="https://github.com/Ifarra/HoloQA#readme">repository guide</a>.</p></details><details><summary>What do I need on Windows?<span aria-hidden="true">+</span></summary><p>A Windows x64 machine, WebView2, a supported Codex CLI sign-in, and agent-browser with its browser runtime. You start the target application yourself. The installer bundles the Python engine, so a separate Python installation is not required. WebView2 setup may need internet access.</p></details><details><summary>Does everything stay on my computer?<span aria-hidden="true">+</span></summary><p>Your plans, captured evidence, and run history live in the local project. Codex sends prompts and project context to your configured provider. Local storage does not mean local model inference. HoloQA uses Codex’s existing authentication rather than copying credentials into the app.</p></details><details><summary>What happens when I pause a run?<span aria-hidden="true">+</span></summary><p>HoloQA waits for Codex interruption and the current QA tool to finish before showing Paused. Resume retains the same live browser, run, and evidence owner. The application may change while paused, and the 30-minute session limit includes pauses. Closing or restarting the desktop does not restore an active run.</p></details><details><summary>Is the desktop ready for production use?<span aria-hidden="true">+</span></summary><p>This is an unsigned development preview. Automated Windows engine, UI, executable, and installer checks have passed, but interactive Windows acceptance with a real Codex/browser session remains outstanding. Signing, automatic updates, and restart recovery are not included. Review the <a href="https://github.com/Ifarra/HoloQA/releases" data-release-link>release notes</a> before installing.</p></details><details><summary>Can I inspect or contribute to the source?<span aria-hidden="true">+</span></summary><p>Yes. HoloQA is MIT licensed. Explore the <a href="https://github.com/Ifarra/HoloQA">source on GitHub</a>, read the desktop guide, or open an issue with a reproducible problem. Evidence-backed QA should be inspectable, including the tool that evaluates it.</p></details></div></section>
+
+    <section class="closing wrap"><span class="closing-star" aria-hidden="true">✦</span><div><span class="eyebrow">YOUR NEXT CHECK STARTS HERE</span><h2>Build with your agent.<br><span>Verify with HoloQA.</span></h2></div><a class="button" data-download href="https://github.com/Ifarra/HoloQA/releases/download/desktop-v0.1.1/HoloQA-Desktop-0.1.1-windows-x64-setup.exe">Download Windows preview <span aria-hidden="true">↗</span></a></section>
+  </main>
+  <footer class="site-footer wrap"><a class="brand" href="#" aria-label="HoloQA home"><img src="assets/icon.png" width="28" height="28" alt=""><span>HoloQA<span class="brand-dot">.</span></span></a><span class="footer-tagline">Every check, backed by evidence.</span><nav aria-label="Footer navigation"><a href="https://github.com/Ifarra/HoloQA">GitHub ↗</a><a href="https://github.com/Ifarra/HoloQA/blob/main/desktop/README.md">Documentation ↗</a><a href="https://github.com/Ifarra/HoloQA/blob/main/LICENSE">MIT License ↗</a></nav><small>Built for your project. Designed for your control.</small></footer>
+  <div class="toast" role="status" aria-live="polite"></div>
+  <dialog id="screenshot-dialog" aria-label="Expanded HoloQA desktop screenshot"><button class="dialog-close" aria-label="Close expanded view">Close <span aria-hidden="true">×</span></button><img src="assets/studio-overview.png" width="1440" height="1050" alt="HoloQA desktop overview"><p>Actual desktop interface · example project</p></dialog>
+</body>
+</html>
