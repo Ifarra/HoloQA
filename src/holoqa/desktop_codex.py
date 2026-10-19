@@ -68,7 +68,9 @@ class CodexSession:
             cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
             start_new_session=os.name != "nt",
-            creationflags=0x00000004 if os.name == "nt" else 0,
+            # CREATE_SUSPENDED establishes Job ownership before execution;
+            # CREATE_NO_WINDOW keeps console CLIs inside the desktop UI.
+            creationflags=(0x00000004 | 0x08000000) if os.name == "nt" else 0,
         )
         if os.name == "nt":
             from holoqa.process import WindowsJob
