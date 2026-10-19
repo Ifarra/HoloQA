@@ -56,6 +56,13 @@ def session(tmp_path, monkeypatch):
             forget_ledger(engine.run.dir)
 
 
+def finish_worker(engine):
+    # Lifecycle changes precede provider/browser cleanup under Engine.lock.
+    # Synchronize with the worker, not an unsynchronized intermediate field.
+    engine.worker.join(timeout=10)
+    assert not engine.worker.is_alive(), "Run cleanup did not finish"
+
+
 def confirm_pause(engine):
     engine.dispatch("run.pause", {})
     assert engine.lifecycle == "pausing", "Interrupt acknowledgement must not claim a paused run"
@@ -113,6 +120,7 @@ def test_pause_resume_preserves_pinned_plan_ledger_process_and_thread(session, m
     assert "Ready" in engine.artifact(engine.snapshot()["path"], capture["file"])["text"]
     provider.send({"method": "fixture/complete"})
     wait_for(lambda: engine.lifecycle == "completed", "Resumed provider did not complete")
+    finish_worker(engine)
     assert engine.snapshot()["status"]["decision"] == "RELEASE"
     assert len(engine.history()) == 1
     assert cleanups == [run.dir]
@@ -187,6 +195,7 @@ def test_disconnect_while_paused_cannot_resume_or_release(session):
     confirm_pause(engine)
     provider.process.kill()
     wait_for(lambda: engine.lifecycle == "failed", "Disconnected paused session was not failed")
+    finish_worker(engine)
     assert engine.provider is None and len(cleanups) == 1
     assert engine.snapshot()["status"]["decision"] == "HOLD"
     with pytest.raises(DesktopError):
@@ -221,6 +230,7 @@ def test_watcher_rechecks_old_finished_flag_after_resume_acquires_lock(session, 
     assert not provider.finished.is_set()
     provider.send({"method": "fixture/complete"})
     wait_for(lambda: engine.lifecycle == "completed", "Resumed turn failed after stale completion race")
+    finish_worker(engine)
 
 
 def test_natural_completion_winning_pause_race_finalizes_normally(session, monkeypatch):
@@ -236,4 +246,5 @@ def test_natural_completion_winning_pause_race_finalizes_normally(session, monke
     monkeypatch.setattr(provider, "interrupt", complete_then_interrupt)
     engine.pause()
     wait_for(lambda: engine.lifecycle == "completed", "Natural completion was downgraded by a Pause click")
+    finish_worker(engine)
     assert engine.provider is None and len(cleanups) == 1
