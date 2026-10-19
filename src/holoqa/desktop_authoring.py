@@ -117,6 +117,7 @@ class PlanAuthor:
                         for item in added:
                             item['id'] = uuid.uuid4().hex
                             self.documents[item['id']] = item
+                        self.state = previous
             except Exception as exc:
                 error = str(exc)[:3000]
             finally:
@@ -249,6 +250,7 @@ class PlanAuthor:
                 session.close()
             with self.lock:
                 self.session = None
+                cancelled = cancelled or self.state == 'cancelling' or generation != self.generation
                 self.state = 'cancelled' if cancelled else 'failed' if error else 'ready'
                 self.error = '' if cancelled else error
                 if cancelled or error:

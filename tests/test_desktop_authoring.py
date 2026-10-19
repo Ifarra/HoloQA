@@ -176,3 +176,28 @@ def test_native_attachment_batch_is_async_cancellable_and_atomic(tmp_path, monke
     wait_for(engine.author,'idle')
     assert not engine.author.documents
     assert not engine.author.error
+
+
+def test_cancel_during_provider_cleanup_discards_the_proposal(tmp_path):
+    closing, release = threading.Event(), threading.Event()
+    class Peer:
+        disconnected=False
+        turn_status='completed'
+        def __init__(self, root, emit, tool, **kwargs):
+            self.tool=tool;self.finished=threading.Event();self.calls=0
+        def initialize(self):return 'ready'
+        def start(self, *args, **kwargs):
+            self.tool('holoqa_submit_plan',{'yaml':YAML});self.finished.set()
+        def close(self):
+            self.calls+=1
+            if self.calls==1:
+                closing.set();assert release.wait(3)
+    draft=PlanAuthor(lambda *_:None,Peer)
+    draft.start(tmp_path,'shop','http://localhost:3000','test checkout',[])
+    assert closing.wait(2)
+    cancelling=threading.Thread(target=draft.cancel)
+    cancelling.start()
+    wait_for(draft,'cancelling')
+    release.set();cancelling.join(3)
+    wait_for(draft,'cancelled')
+    assert draft.content==''
