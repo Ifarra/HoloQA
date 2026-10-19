@@ -215,3 +215,18 @@ def test_worker_resource_limits_are_applied_without_changing_test_process(monkey
     assert limits[resource.RLIMIT_AS][0] == 512 * 1024 * 1024
     assert limits[resource.RLIMIT_CPU] == (8, 9)
     assert limits[resource.RLIMIT_FSIZE][0] == documents.MAX_OUTPUT
+
+
+def test_compressed_pdf_stream_expansion_is_bounded(tmp_path):
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, NameObject
+    writer=PdfWriter()
+    page=writer.add_blank_page(width=200,height=200)
+    stream=DecodedStreamObject()
+    stream.set_data(b' ' * (9 * 1024 * 1024))
+    page[NameObject('/Contents')]=writer._add_object(stream.flate_encode())
+    source=tmp_path/'compressed.pdf'
+    writer.write(source)
+    assert source.stat().st_size < 5 * 1024 * 1024
+    with pytest.raises(DocumentError):
+        read_document(str(source))

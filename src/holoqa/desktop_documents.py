@@ -173,10 +173,18 @@ def _read_document(path: str) -> dict:
         raise DocumentError('Each document must be 5 MiB or smaller.', 'source_limit')
     suffix = candidate.suffix.lower()
     if suffix == '.pdf':
-        from pypdf import PdfReader
-        from pypdf import _utils
+        from pypdf import PdfReader, overwrite_configuration
         # Bound individual compressed streams as well as file/page/text sizes.
-        _utils.ZLIB_MAX_OUTPUT_LENGTH = 8 * 1024 * 1024
+        overwrite_configuration(
+            maximum_declared_stream_length=8 * 1024 * 1024,
+            array_based_stream_maximum_output_length=8 * 1024 * 1024,
+            zlib_maximum_output_length=8 * 1024 * 1024,
+            lzw_maximum_output_length=8 * 1024 * 1024,
+            run_length_maximum_output_length=8 * 1024 * 1024,
+            brotli_maximum_output_length=8 * 1024 * 1024,
+            stream_decoding_work_maximum_length=16 * 1024 * 1024,
+            stream_parsing_work_maximum_count=100_000,
+        )
         reader = PdfReader(io.BytesIO(data), strict=True)
         if reader.is_encrypted:
             raise DocumentError('Encrypted PDFs are not supported. Attach an unlocked text document.', 'encrypted')
