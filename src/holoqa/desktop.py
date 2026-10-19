@@ -24,6 +24,7 @@ from pydantic import create_model, ConfigDict
 
 from holoqa import browser, plan as plans, report, workspace
 from holoqa.desktop_codex import CodexSession
+from holoqa.desktop_authoring import PlanAuthor, validate_yaml
 from holoqa.run import Run
 from holoqa.storage import atomic_json
 
@@ -40,6 +41,7 @@ class DesktopError(ValueError):
 class Engine:
     def __init__(self, state_dir: Path, emit=lambda *_: None):
         self.state_dir, self.emit = state_dir, emit
+        self.author = PlanAuthor(emit, lambda *args, **kwargs: CodexSession(*args, **kwargs))
         self.root: Path | None = None
         self.reviews: dict[str, tuple] = {}
         self.run: Run | None = None
@@ -94,6 +96,8 @@ class Engine:
         return candidate
 
     def _idle(self):
+        if self.author.active:
+            raise DesktopError("Cancel plan generation before changing projects or starting QA")
         if self.lifecycle in {"starting", "running", "pausing", "paused", "stopping"}:
             raise DesktopError("Stop the active run before changing projects or starting another")
 
@@ -163,6 +167,7 @@ class Engine:
         root = Path(path).expanduser().resolve()
         if not root.is_dir():
             raise DesktopError("Select an existing project directory")
+        self.author.reset()
         self.root, self.reviews, self.run = root, {}, None
         recent = [str(root)] + [p for p in self.recent() if p != str(root)]
         atomic_json(self.state_dir / "recent.json", recent[:12])
@@ -500,6 +505,8 @@ class Engine:
             return {"protocol": PROTOCOL, "recent": self.recent(), "project": self.project(),
                     "provider": self.provider_status, "browserInstalled": bool(shutil.which("agent-browser")),
                     "qaTools": [tool["name"] for tool in self._specs()]}
+        if method == "plan.draft.cancel":
+            return self.author.cancel()
         if method == "run.stop":
             return self.stop()
         if method == "approval.respond":
@@ -509,6 +516,7 @@ class Engine:
             return {"ok": True}
         if method == "shutdown":
             self.closing = True
+            self.author.cancel()
             return self.stop()
         with self.lock:
             if self.closing:
@@ -527,6 +535,35 @@ class Engine:
                 return self.review(params["path"], params["sha256"])
             if method == "plan.create":
                 return self.create_plan(params["app"], params["url"])
+            if method == "plan.draft.snapshot":
+                return self.author.snapshot()
+            if method in {"plan.attach", "plan.import", "plan.attachment.remove", "plan.draft.start", "plan.draft.save"}:
+                self._idle()
+                if not self.root:
+                    raise DesktopError("Open a project folder first")
+                if method == "plan.attach":
+                    return self.author.attach(params["paths"], background=True)
+                if method == "plan.import":
+                    return self.author.import_file(params["path"])
+                if method == "plan.attachment.remove":
+                    return self.author.remove(params["id"])
+                if method == "plan.draft.start":
+                    return self.author.start(self.root, params["app"], params["url"], params["prompt"], params.get("attachments", []))
+                if self.author.state != "ready":
+                    raise DesktopError("Generate or import a valid draft before saving")
+                content, filename = params["yaml"], params["filename"]
+                import re
+                if not isinstance(filename, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,100}\.plan\.ya?ml", filename):
+                    raise DesktopError("Use a filename such as checkout.plan.yaml, without folders")
+                validate_yaml(content)
+                # Do not follow a redirected destination, even when dangling.
+                destination = self.root / filename
+                if destination.is_symlink() or destination.resolve() != destination:
+                    raise DesktopError("Linked plan destinations are not supported")
+                with destination.open("x", encoding="utf-8", newline="") as handle:
+                    handle.write(content)
+                self.reviews.clear()
+                return self.load_plan(filename)[1]
             if method == "provider.check":
                 return self.check_provider()
             if method == "run.start":
@@ -554,6 +591,9 @@ class Engine:
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--extract-document":
+        from holoqa.desktop_documents import extract_main
+        raise SystemExit(extract_main(sys.argv[2]))
     # Windows pipes otherwise inherit a legacy console code page. The Rust
     # transport and Codex protocol are UTF-8 regardless of the user's locale.
     for stream in (sys.stdin, sys.stdout):
@@ -594,6 +634,7 @@ def main():
         finally:
             pool.shutdown(wait=True)
             engine.closing = True
+            engine.author.cancel()
             engine.stop()
 
 

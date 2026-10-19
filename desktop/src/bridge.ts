@@ -22,3 +22,9 @@ export async function openFolder(): Promise<Project | null> {
 export async function events(callback: (event: {event: string; data: Record<string, unknown>}) => void) {
   return native ? listen<{event: string; data: Record<string, unknown>}>('engine-event', e => callback(e.payload)) : () => {};
 }
+
+export interface Draft {state:string; yaml:string; error:string; summary:{app:string;target:string;checks:number;warnings:string[]}|null; attachments:{id:string;name:string;size:number;characters:number;sha256:string}[]}
+export async function pickPlanFiles(kind:'documents'|'plan'):Promise<Draft|null> {
+  if (!native) throw new Error('Document selection requires HoloQA Desktop.');
+  return invoke<Draft|null>('pick_plan_files', {kind});
+}

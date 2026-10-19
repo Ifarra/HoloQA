@@ -4,6 +4,14 @@ Desktop releases use `desktop-vX.Y.Z` tags. The Python engine has an independent
 version line. Before 1.0, patch versions carry fixes; minor versions introduce
 capabilities or compatibility changes, with breaking changes called out here.
 
+## 0.2.0 — Unreleased preview
+
+- Create a QA plan from a natural-language request using the existing Codex sign-in.
+- Attach TXT, Markdown, text-based PDF, and DOCX requirements with bounded, cancellable text extraction.
+- Import external YAML plans, edit generated/imported YAML, and save a new project plan without overwriting existing files.
+- Validate drafts through the execution schema; require a fresh full-plan review before any scan.
+- Separate draft generation and document intake from QA lifecycles, with cancellation and visible provider-sharing disclosure.
+
 ## 0.1.1 — Preview — 2026-10-19
 
 Desktop and browser/resource lifecycle work integrated into `main`.

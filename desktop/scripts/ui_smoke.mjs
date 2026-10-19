@@ -14,8 +14,13 @@ const root = resolve(desktop, '..');
 const temp = await mkdtemp(join(tmpdir(), 'holoqa-ui-'));
 const project = join(temp, 'storefront é with spaces');
 await mkdir(project);
+const projectB=join(temp,'second-project');await mkdir(projectB);
+let folderPicks=0;
+const requirements=join(temp,'requirements.md');
+await writeFile(requirements,'Acceptance: order confirmation must be visible.');
 const source = `meta:\n  app: storefront\n  base_url: http://localhost:3000\nstages:\n  - id: A\n    title: Discovery\nsteps:\n  - id: A1\n    stage: A\n    title: Storefront is ready\n    expect:\n      - text_contains: Ready\n`;
 await writeFile(join(project,'holoqa.plan.yaml'),source);
+await writeFile(join(projectB,'holoqa.plan.yaml'),source.replace('localhost:3000','localhost:4000'));
 await writeFile(join(project,'package.json'),JSON.stringify({dependencies:{next:'test'},scripts:{dev:'DO NOT EXECUTE'}}));
 const python = process.env.HOLOQA_DESKTOP_PYTHON || join(root,'.venv',process.platform==='win32'?'Scripts/python.exe':'bin/python');
 const engine = spawn(python,[join(desktop,'scripts/ui_engine_fixture.py'),'--state-dir',join(temp,'state')],{cwd:root,stdio:['pipe','pipe','inherit']});
@@ -31,7 +36,8 @@ try {
   const page=await browser.newPage({viewport:{width:1440,height:1050},reducedMotion:'reduce'});
   page.setDefaultTimeout(10000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.exposeFunction('__nativeTest',async(command,args)=>{
-    if(command==='open_project')return request('project.open',{path:project});
+    if(command==='open_project')return request('project.open',{path:folderPicks++===0?project:projectB});
+    if(command==='pick_plan_files')return args.kind==='documents'?request('plan.attach',{paths:[requirements]}):request('plan.import',{path:join(project,'holoqa.plan.yaml')});
     if(command==='engine_request'){
       // Review state must stay coherent even with real Windows IPC latency.
       if(args.method==='plan.review')await new Promise(r=>setTimeout(r,200));
@@ -43,8 +49,8 @@ try {
   forwardEvent=event=>page.evaluate(event=>window.__engineTestEvent?.(event),event).catch(()=>{});
   await page.addInitScript(()=>{
     globalThis.isTauri=true;
-    let callback;window.__engineTestEvent=payload=>callback?.({payload});
-    window.__TAURI_INTERNALS__={invoke:(command,args)=>window.__nativeTest(command,args),transformCallback:fn=>{callback=fn;return 1;},unregisterCallback:()=>{}};
+    let sequence=0;const callbacks=new Map();window.__engineTestEvent=payload=>callbacks.forEach(callback=>callback({payload}));
+    window.__TAURI_INTERNALS__={invoke:(command,args)=>window.__nativeTest(command,args),transformCallback:fn=>{const id=++sequence;callbacks.set(id,fn);return id;},unregisterCallback:id=>callbacks.delete(id)};
     window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:()=>{}};
   });
   await page.goto('http://127.0.0.1:1421');
@@ -99,8 +105,53 @@ try {
   await page.getByRole('button',{name:'Stop run',exact:true}).click();
   await page.getByText('interrupted ·',{exact:false}).waitFor();
   assert.equal(await page.getByRole('button',{name:'Resume run',exact:true}).count(),0);
+  await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Create plan',exact:true}).click();
+  await page.getByLabel('What should this plan cover?').fill('Test checkout with the attached acceptance criteria.');
+  await page.getByRole('button',{name:'Attach documents',exact:true}).click();
+  await page.getByText('requirements.md',{exact:true}).waitFor();
+  await page.getByLabel('What should this plan cover?').fill('Test checkout; wait for cancellation.');
+  await page.getByRole('button',{name:'Generate plan with Codex',exact:true}).click();
+  await page.getByRole('region',{name:'Active plan authoring'}).waitFor();
+  assert.equal(await page.getByRole('region',{name:'Active QA session'}).count(),0);
+  assert.equal(await page.getByRole('button',{name:'Open folder',exact:true}).isEnabled(),false);
+  await page.getByRole('button',{name:'Cancel generation',exact:true}).click();
+  await page.getByRole('button',{name:'Generate plan with Codex',exact:true}).waitFor({state:'visible'});
+  await page.getByLabel('What should this plan cover?').fill('Test checkout with the attached acceptance criteria.');
+  await page.getByRole('button',{name:'Generate plan with Codex',exact:true}).click();
+  await page.getByText('Draft ready. Edit, save, then review every check.',{exact:true}).waitFor();
+  assert.match(await page.getByLabel('Plan YAML',{exact:true}).inputValue(),/Generated checkout check/);
+  // Local edits survive tab navigation before save.
+  await page.getByLabel('Plan YAML',{exact:true}).fill((await page.getByLabel('Plan YAML',{exact:true}).inputValue()).replace('Generated checkout check','Reviewed checkout draft'));
+  await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Overview',exact:true}).click();
+  await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Create plan',exact:true}).click();
+  assert.match(await page.getByLabel('Plan YAML',{exact:true}).inputValue(),/Reviewed checkout draft/);
+  for(const width of [1440,1000,800]){await page.setViewportSize({width,height:1050});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,`Authoring overflow at ${width}`);}
+  await page.setViewportSize({width:1440,height:1050});
+  if(process.env.HOLOQA_SCREENSHOTS)await page.screenshot({path:join(process.env.HOLOQA_SCREENSHOTS,'desktop-authoring.png'),fullPage:true});
+  await page.getByRole('button',{name:'Save and review',exact:true}).click();
+  await page.getByRole('heading',{name:'Reviewed checkout draft',exact:true}).waitFor();
+  assert.equal(await page.getByRole('checkbox').isChecked(),false);
+  assert.equal(await page.getByRole('button',{name:'Start supervised run'}).isEnabled(),false);
+  await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Create plan',exact:true}).click();
+  await page.getByLabel('Plan YAML',{exact:true}).fill((await page.getByLabel('Plan YAML',{exact:true}).inputValue()).replace('Reviewed checkout draft','Unsaved local edit'));
+  await page.getByRole('button',{name:'Attach documents',exact:true}).click();
+  await page.getByText('2 / 8',{exact:false}).waitFor();
+  await page.getByRole('button',{name:'Generate plan with Codex',exact:true}).waitFor();
+  assert.match(await page.getByLabel('Plan YAML',{exact:true}).inputValue(),/Unsaved local edit/);
+  await page.getByRole('button',{name:'Import plan file',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('.yaml-input').value.includes('Changed'));
+  assert.match(await page.getByLabel('Plan YAML',{exact:true}).inputValue(),/Changed/);
+  await page.getByLabel('Save as',{exact:true}).fill('imported.plan.yaml');
+  await page.getByRole('button',{name:'Save and review',exact:true}).click();
+  await page.getByRole('heading',{name:'Storefront is ready',exact:true}).waitFor();
+  assert.equal(await page.getByRole('checkbox').isChecked(),false);
+  await page.getByRole('button',{name:'Open folder',exact:true}).click();
+  await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Create plan',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('.author-fields input:last-child') || document.querySelector('.author-fields'));
+  await page.waitForFunction(()=>[...document.querySelectorAll('.author-fields input')].some(input=>input.value==='http://localhost:4000'));
+  assert.equal(await page.getByLabel('Application URL',{exact:true}).inputValue(),'http://localhost:4000');
   assert.deepEqual(errors,[]);
-  console.log('UI + real stdio engine smoke passed: discovery, review, external edit refusal, history, navigation, responsive layout, approval→pause→resume→pause→stop. No model calls.');
+  console.log('UI + real stdio engine smoke passed: discovery, review, external edit refusal, history, navigation, responsive layout, approval→pause→resume→pause→stop, document attachment→agent draft→edit→save→mandatory review. No model calls.');
 } finally {
   if(browser)await browser.close();
   engine.stdin.end();lines.close();vite.kill();
