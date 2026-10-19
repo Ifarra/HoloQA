@@ -226,6 +226,8 @@ class Engine:
             raise DesktopError("Set a resolved HTTP or HTTPS base_url in the plan")
         if not shutil.which("agent-browser"):
             raise DesktopError("Install agent-browser and its browser runtime before running QA")
+        from holoqa import observe
+        observe.set_browser_options(plan.meta.browser.ignore_https_errors, plan.meta.browser.args)
         specs = self._specs()
         provider = CodexSession(self.root, self.emit, self.tool)
         try:

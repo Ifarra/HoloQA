@@ -106,3 +106,26 @@ def test_stop_owns_a_child_that_outlives_its_parent(tmp_path):
             while status.exists() and status.read_text().split()[2]!='Z' and time.monotonic()<until:time.sleep(.01)
             assert not status.exists() or status.read_text().split()[2]=='Z'
     finally:codex.close()
+
+
+def test_cancellation_does_not_wait_for_a_stalled_stdin_writer(tmp_path):
+    codex=CodexSession(tmp_path,lambda *_:None,
+        command=[sys.executable,'-c','import time;time.sleep(120)'])
+    errors=[]
+    def write():
+        try:codex.send({'payload':'x'*(512*1024)})
+        except (OSError,ProtocolError) as error:errors.append(error)
+    writer=threading.Thread(target=write,daemon=True)
+    writer.start()
+    until=time.monotonic()+3
+    while not codex.write_lock.locked() and time.monotonic()<until:time.sleep(.01)
+    closer=threading.Thread(target=codex.close,daemon=True)
+    closer.start();closer.join(timeout=3)
+    completed=not closer.is_alive()
+    if not completed:
+        # Ensure a regression fails without leaving the test runner hung.
+        codex.process.kill();closer.join(timeout=5)
+    writer.join(timeout=3)
+    assert completed, 'Cancellation waited for an unread stdin pipe'
+    assert not writer.is_alive()
+    assert codex.process.poll() is not None

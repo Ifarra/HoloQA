@@ -1,6 +1,6 @@
 name: Windows desktop
 concurrency:
-  group: desktop-${{ github.ref }}
+  group: desktop-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 on:
   workflow_dispatch:

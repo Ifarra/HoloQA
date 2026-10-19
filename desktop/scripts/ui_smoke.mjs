@@ -32,7 +32,11 @@ try {
   page.setDefaultTimeout(10000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.exposeFunction('__nativeTest',async(command,args)=>{
     if(command==='open_project')return request('project.open',{path:project});
-    if(command==='engine_request')return request(args.method,args.params);
+    if(command==='engine_request'){
+      // Review state must stay coherent even with real Windows IPC latency.
+      if(args.method==='plan.review')await new Promise(r=>setTimeout(r,200));
+      return request(args.method,args.params);
+    }
     if(command.startsWith('plugin:event|'))return 1;
     throw new Error('Unexpected native command');
   });
@@ -49,7 +53,11 @@ try {
   await page.getByRole('heading',{name:'Storefront is ready',exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'Start supervised run'}).isEnabled(),false);
   await page.getByRole('checkbox').check();
-  await page.getByRole('button',{name:'Start supervised run'}).waitFor();
+  // Approval must finish at the engine before editing the approved bytes.
+  await page.waitForFunction(()=>{
+    const button=document.querySelector('.review-footer .button');
+    return button && !button.disabled;
+  });
   // Edit after human review: launch must refuse before any provider/model work.
   await writeFile(join(project,'holoqa.plan.yaml'),source.replace('Ready','Changed'));
   await page.getByRole('button',{name:'Start supervised run'}).click();

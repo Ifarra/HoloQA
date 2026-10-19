@@ -211,11 +211,12 @@ class CodexSession:
         self.emit("approval.resolved", {"id": key})
 
     def close(self):
-        with self.write_lock:
+        # Never wait behind a blocked pipe writer before killing the reader.
+        # Terminating the process first releases any in-flight stdin write.
+        with self.lock:
             if self.closed:
                 return
             self.closed = True
-        with self.lock:
             self.approvals.clear()
         try:
             if self.job:
