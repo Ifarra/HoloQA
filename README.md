@@ -1015,3 +1015,24 @@ src/holoqa/
 `docs/DESIGN.md` covers the architecture, what was deleted from the previous
 server-hosted version and why, and the decisions that changed during
 implementation.
+
+### Managed browser resources
+
+`holoqa agent` assigns a stable, run-specific browser session to each actor.
+The generated agent prompt lists the exact `AGENT_BROWSER_SESSION` values to
+use for navigation; HoloQA captures use the same mapping. Reuse these sessions
+instead of opening new sessions for each step. Logical actor names in plans
+and evidence do not change.
+
+Browser sessions remain available across automatic continuation rounds. The
+wrapper closes its run's sessions after the execution finishes, stalls, reaches
+its round limit, fails, or is cancelled. A later resume therefore needs to
+reopen the application and authenticate again. Cleanup failures appear in
+`agent.json` as `browser_cleanup_errors`; they do not replace the QA verdict.
+Sessions from other runs and standalone browser sessions are not closed.
+
+Agent output uses a bounded queue (256 queued records) with backpressure.
+Cancellation and execution errors also stop the owned provider process tree
+(POSIX process groups; Windows `taskkill /T`). Browser cleanup is best effort;
+a forced host shutdown cannot execute it. Standalone MCP usage retains its
+existing actor session names and manual browser lifecycle.

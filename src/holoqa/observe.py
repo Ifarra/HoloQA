@@ -120,6 +120,11 @@ def run_cli(
         command = ["cmd", "/c", binary, *args]
     environment = dict(os.environ)
     if session:
+        if environment.get("HOLOQA_MANAGED_BROWSER") == "1":
+            from holoqa.browser import session_name
+            # Physical names are also accepted for wrapper cleanup.
+            if not (args and args[0] == "close"):
+                session = session_name(Path(environment["HOLOQA_RUN_DIR"]), session)
         environment["AGENT_BROWSER_SESSION"] = session
     # Plan-declared browser options travel as the documented env var, so they
     # apply to the browser the daemon already runs rather than only to this

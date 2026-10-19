@@ -7,9 +7,11 @@ result. The only release decision returned here comes from the HoloQA run.
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from holoqa import browser as browser_module
 from holoqa import plan as plan_module
 from holoqa import run as run_module
 
@@ -34,6 +37,7 @@ MODES = ("supervised", "unattended")
 MANIFEST_FILE = "agent.json"
 EVENTS_FILE = "agent-events.jsonl"
 PROMPT_FILE = "agent-prompt.md"
+_DEFER_BROWSER_CLEANUP: ContextVar[bool] = ContextVar("defer_browser_cleanup", default=False)
 
 
 #: What "unattended" actually means for each provider. These differ enough that
@@ -161,7 +165,7 @@ def build_launch(
         raise AgentError(f"unknown mode {request.mode!r}; use one of {', '.join(MODES)}")
 
     command = _mcp_command()
-    env = {**os.environ, "HOLOQA_RUN_DIR": str(run.dir)}
+    env = {**os.environ, "HOLOQA_RUN_DIR": str(run.dir), "HOLOQA_MANAGED_BROWSER": "1"}
     config_path = directory / f"{request.provider}-mcp-config.json"
 
     if request.provider == "codex":
@@ -173,6 +177,7 @@ def build_launch(
             "--config", f"mcp_servers.holoqa.args={_toml_list(command[1:])}",
             "--config", f"mcp_servers.holoqa.env.HOLOQA_RUN_DIR={_toml(str(run.dir))}",
             "--config", "mcp_servers.holoqa.required=true",
+            "--config", 'mcp_servers.holoqa.env.HOLOQA_MANAGED_BROWSER="1"',
             # `codex exec` has no human approval host. Approve only HoloQA's
             # own local tools; the sandbox remains workspace-write.
             "--config", "mcp_servers.holoqa.default_tools_approval_mode=\"approve\"",
@@ -192,7 +197,7 @@ def build_launch(
         config_path.write_text("# Codex configuration is supplied through --config.\n", encoding="utf-8")
     elif request.provider == "claude":
         config_path.write_text(json.dumps({"mcpServers": {"holoqa": {
-            "command": command[0], "args": command[1:], "env": {"HOLOQA_RUN_DIR": str(run.dir)},
+            "command": command[0], "args": command[1:], "env": {"HOLOQA_RUN_DIR": str(run.dir), "HOLOQA_MANAGED_BROWSER": "1"},
         }}}, indent=2), encoding="utf-8")
         # Keep the multiline prompt last. With a Windows .cmd shim, arguments
         # after a newline-bearing prompt are otherwise eaten by `cmd /c`.
@@ -222,7 +227,7 @@ def build_launch(
     else:
         config_path.write_text(json.dumps({"mcp": {"servers": {"holoqa": {
             "type": "local", "command": command, "cwd": str(request.cwd),
-            "environment": {"HOLOQA_RUN_DIR": str(run.dir)}, "codemode": False,
+            "environment": {"HOLOQA_RUN_DIR": str(run.dir), "HOLOQA_MANAGED_BROWSER": "1"}, "codemode": False,
         }}}}, indent=2), encoding="utf-8")
         env["OPENCODE_CONFIG"] = str(config_path)
         args = ["run", "--format", "json"]
@@ -282,15 +287,53 @@ def _stream_process(
         # Agent CLIs emit UTF-8 JSON/events even when the Windows console uses
         # cp1252. Never let one non-console character kill the drain thread.
         encoding="utf-8", errors="replace",
+        start_new_session=os.name != "nt",
     )
-    output: queue.Queue[tuple[str, str | None]] = queue.Queue()
+    output: queue.Queue[tuple[str, str | None]] = queue.Queue(maxsize=256)
+
+    def stop_process() -> None:
+        # The agent owns MCP children too. On POSIX the isolated process group
+        # lets cancellation stop that tree without touching the user's shell.
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        elif process.poll() is None:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=10, check=False)
+        if process.poll() is None:
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait()
+
+    stop_readers = threading.Event()
+
+    def enqueue(item: tuple[str, str | None]) -> None:
+        while not stop_readers.is_set():
+            try:
+                output.put(item, timeout=0.2)
+                return
+            except queue.Full:
+                continue
 
     def drain(channel: str, stream: Any) -> None:
         try:
             for line in iter(stream.readline, ""):
-                output.put((channel, line.rstrip("\n")))
+                enqueue((channel, line.rstrip("\n")))
+                if stop_readers.is_set():
+                    break
         finally:
-            output.put((channel, None))
+            enqueue((channel, None))
+            stream.close()
 
     readers = [threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
                threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True)]
@@ -305,14 +348,16 @@ def _stream_process(
     try:
         while open_streams:
             if request.cancel_event and request.cancel_event.is_set() and process.poll() is None:
-                process.terminate()
                 cancelled = True
+                stop_process()
+                break
             # A wall-clock deadline turns a hang into a failure. Without one, an
             # agent that stalls holds a CI job open forever instead of reporting
             # an incomplete run — which is the worse of the two outcomes.
             if deadline is not None and time.monotonic() > deadline and process.poll() is None:
-                process.terminate()
                 timed_out = True
+                stop_process()
+                break
             try:
                 channel, line = output.get(timeout=0.2)
             except queue.Empty:
@@ -334,21 +379,20 @@ def _stream_process(
                 event_handle.write(json.dumps({"channel": channel, "line": line}) + "\n")
                 event_handle.flush()
     except KeyboardInterrupt:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        stop_process()
         return 130
+    except BaseException:
+        stop_process()
+        raise
     finally:
+        stop_readers.set()
+        if process.poll() is None:
+            stop_process()
+        for reader in readers:
+            reader.join(timeout=0.5)
         if event_handle:
             event_handle.close()
     if cancelled or timed_out:
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
         return 130
     return process.wait()
 
@@ -376,6 +420,15 @@ def launch(
         raise AgentError(f"working directory does not exist: {request.cwd}")
     plan_path = run.plan_pin
     prompt = workflow_prompt(plan_path, run.dir, resume=resume)
+    prompt += (
+        "\nBrowser sessions (actor -> AGENT_BROWSER_SESSION): "
+        + json.dumps(browser_module.sessions(run), sort_keys=True)
+        + "\nFor EVERY agent-browser command set AGENT_BROWSER_SESSION to the mapped "
+        "session for that actor. Reuse it across steps; never create extra sessions "
+        "or browsers. Keep tabs bounded and close tabs you no longer need. "
+        "HoloQA owns session cleanup. After cleanup or a resumed execution, "
+        "reopen the target and authenticate as needed.\n"
+    )
     deadline = time.monotonic() + timeout_s if timeout_s else None
     with tempfile.TemporaryDirectory(prefix="holoqa-agent-") as temp:
         spec = build_launch(request, run, prompt, Path(temp))
@@ -394,7 +447,16 @@ def launch(
             "config": f"ephemeral:{request.provider}", "started_at": run_module.now(),
         }
         _write_manifest(run, manifest)
-        code = _stream_process(spec, request, run, deadline=deadline)
+        try:
+            code = _stream_process(spec, request, run, deadline=deadline)
+        except BaseException as error:
+            manifest.update({"state": "interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
+                             "finished_at": run_module.now(), "error": type(error).__name__})
+            raise
+        finally:
+            if not _DEFER_BROWSER_CLEANUP.get():
+                manifest["browser_cleanup_errors"] = browser_module.cleanup(run)
+            _write_manifest(run, manifest)
 
     state = "interrupted" if code == 130 else ("completed" if code == 0 else "failed")
     if code == 130 and timeout_s:
@@ -404,7 +466,7 @@ def launch(
     return {"agent": manifest, "holoqa": _status(run)}
 
 
-def run_until_done(
+def _run_until_done(
     request: AgentRunRequest,
     run: run_module.Run,
     *,
@@ -446,6 +508,29 @@ def run_until_done(
     result["rounds"] = history
     result["until_done"] = not result.get("holoqa", {}).get("pending")
     return result
+
+
+def run_until_done(
+    request: AgentRunRequest,
+    run: run_module.Run,
+    *,
+    max_rounds: int = 5,
+    timeout_s: int = 0,
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Retain browser state between rounds, release sessions on every exit."""
+    token = _DEFER_BROWSER_CLEANUP.set(True)
+    result: dict[str, Any] = {}
+    try:
+        result = _run_until_done(request, run, max_rounds=max_rounds,
+                                 timeout_s=timeout_s, resume=resume)
+        return result
+    finally:
+        _DEFER_BROWSER_CLEANUP.reset(token)
+        errors = browser_module.cleanup(run)
+        if result.get("agent") is not None:
+            result["agent"]["browser_cleanup_errors"] = errors
+            _write_manifest(run, result["agent"])
 
 
 def create_and_launch(
