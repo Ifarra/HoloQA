@@ -36,7 +36,7 @@ model.
 
 ## Windows desktop preview
 
-[**Download HoloQA Desktop v0.1.0 Preview**](https://github.com/Ifarra/HoloQA/releases/tag/desktop-v0.1.0) · [All releases](https://github.com/Ifarra/HoloQA/releases) · [Desktop setup](desktop/README.md)
+[**Download HoloQA Desktop Preview**](https://github.com/Ifarra/HoloQA/releases) · [All releases](https://github.com/Ifarra/HoloQA/releases) · [Desktop setup](desktop/README.md)
 
 A Windows x64 workspace for local project folders, reviewed QA plans, supervised
 Codex runs, captured evidence, and pause/resume. This is an **unsigned prerelease**;

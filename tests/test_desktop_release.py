@@ -24,6 +24,8 @@ def release_root(tmp_path):
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
+    # Test fixtures keep a fixed version when the shipped desktop advances.
+    version.set_version("0.1.0", tmp_path)
     return tmp_path
 
 
@@ -76,7 +78,7 @@ def test_release_assets_have_stable_names_checksums_and_source_provenance(releas
     manifest = script.prepare(source, destination, 'a' * 40, '123', root=release_root)
     assert manifest['installer'] == 'HoloQA-Desktop-0.1.0-windows-x64-setup.exe'
     assert manifest['sha256'] == hashlib.sha256(contents).hexdigest()
-    assert manifest['sourceCommit'] == 'a' * 40 and manifest['engineVersion'] == '2.0.0'
+    assert manifest['sourceCommit'] == 'a' * 40 and manifest['engineVersion'] == tomllib.loads((release_root / 'pyproject.toml').read_text())['project']['version']
     assert manifest['prerelease'] and manifest['unsigned']
     for line in (destination / 'SHA256SUMS.txt').read_text().splitlines():
         digest, name = line.split('  ')

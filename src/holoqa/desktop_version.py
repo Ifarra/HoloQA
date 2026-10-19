@@ -1,2 +1,2 @@
 """Desktop release version; synchronized by desktop/scripts/version.py."""
-VERSION = "0.1.0"
+VERSION = "0.1.1"

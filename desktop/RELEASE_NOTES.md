@@ -1,4 +1,4 @@
-A **Windows x64 preview** of the HoloQA desktop workspace. This is a prerelease from the desktop development branch, built on the existing HoloQA engine. The installer is unsigned; it has not completed an interactive Windows acceptance pass with a real Codex QA session.
+A **Windows x64 preview** of the HoloQA desktop workspace. This prerelease is built from `main` and bundles the existing HoloQA engine. The installer is unsigned; it has not completed an interactive Windows acceptance pass with a real Codex QA session.
 
 ### Included
 
