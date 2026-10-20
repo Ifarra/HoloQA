@@ -22,11 +22,10 @@ are supplied in `new-logo/`. The desktop and site use the approved palette below
   typography, with indigo and violet accents for interactive states.
 - Use `HoloQA_Horizontal_Wordmark.png` for horizontal branding,
   `HoloQA_Symbol_Transparent.png` for the standalone mark, and
-  `HoloQA_Icon_Dark.png` for app and browser icons. These are raster masters
-  derived from the supplied transparent PNGs; SVG entry points embed the same
-  masters for compatibility.
-- Use `HoloQA_Wordmark_Dark_Surface.png` for README surfaces that may render
-  with a light background, so the silver lettering remains legible.
+  `HoloQA_App_Icon_Transparent.png` for app and browser icons. All three have
+  transparent backgrounds. The SVG entry points embed the same raster masters.
+- The supplied violet artwork is hue-shifted toward cobalt, while preserving
+  the silver lettering, alpha channel, and the approved interface palette.
 - Desktop chrome, the GitHub Pages site, README, favicon, and Windows icon use
   the updated mark.
 

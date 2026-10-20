@@ -4,6 +4,11 @@ Desktop releases use `desktop-vX.Y.Z` tags. The Python engine has an independent
 version line. Before 1.0, patch versions carry fixes; minor versions introduce
 capabilities or compatibility changes, with breaking changes called out here.
 
+## 0.3.2 — Preview — 2026-10-20
+
+- Use transparent cobalt-shifted wordmark and monogram artwork across the desktop, Windows installer, browser icons, repository, and website.
+- Preserve the supplied silver lettering and approved interface palette while replacing opaque app tiles with the transparent mark.
+
 ## 0.3.1 — Preview — 2026-10-20
 
 - Apply the new 3D purple HoloQA wordmark, standalone monogram, and app icon across the desktop UI, Windows installer, browser icon, repository, and website.

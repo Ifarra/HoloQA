@@ -80,7 +80,7 @@ document.querySelector('.copy-command').addEventListener('click', async () => {
   }
 });
 
-// Progressive enhancement: the verified 0.3.1 links work without this request.
+// Progressive enhancement: the verified 0.3.2 links work without this request.
 // Public GitHub metadata keeps the download current; no account or tracking.
 async function refreshRelease() {
   try {

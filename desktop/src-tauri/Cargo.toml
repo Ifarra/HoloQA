@@ -1,6 +1,6 @@
 [package]
 name = "holoqa-desktop"
-version = "0.3.1"
+version = "0.3.2"
 description = "Evidence-backed QA desktop workspace"
 edition = "2021"
 license = "MIT"

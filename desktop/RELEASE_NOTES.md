@@ -1,4 +1,4 @@
-A **Windows x64 preview** of HoloQA Desktop 0.3.1. It bundles the HoloQA
+A **Windows x64 preview** of HoloQA Desktop 0.3.2. It bundles the HoloQA
 2.1.0 engine and supports supervised QA with Codex CLI or Claude Code using
 their existing sign-in. This prerelease installer is unsigned and has not
 completed interactive Windows acceptance with a real provider and browser.
@@ -14,11 +14,11 @@ completed interactive Windows acceptance with a real provider and browser.
   pause, resume, or stop within the same live desktop session.
 - Edit project environment values and optionally start an application with an
   explicit command.
-- Use the refreshed HoloQA wordmark and app icon throughout the desktop and site.
+- Use the cobalt-shifted wordmark and transparent monogram for the desktop, installer, browser icons, repository, and site.
 
 ### Install and run
 
-1. Download `HoloQA-Desktop-0.3.1-windows-x64-setup.exe` below. WebView2 may need
+1. Download `HoloQA-Desktop-0.3.2-windows-x64-setup.exe` below. WebView2 may need
    internet access during setup.
 2. Install either Codex CLI or Claude Code and sign in as the same Windows user
    who runs HoloQA (`codex login` or `claude`).
@@ -38,7 +38,7 @@ approval flow. Neither provider can author HoloQA verdicts.
 `SHA256SUMS.txt` checks the installer and `release-manifest.json`. The manifest
 records the exact source commit, successful build run, engine version, and
 installer hash. In PowerShell, compare
-`Get-FileHash .\HoloQA-Desktop-0.3.1-windows-x64-setup.exe -Algorithm SHA256`
+`Get-FileHash .\HoloQA-Desktop-0.3.2-windows-x64-setup.exe -Algorithm SHA256`
 with the checksum file.
 
 Automated engine, protocol, UI, executable startup, and installer checks run in
