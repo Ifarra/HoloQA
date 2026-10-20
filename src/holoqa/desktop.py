@@ -13,6 +13,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import threading
@@ -25,6 +26,7 @@ from pydantic import create_model, ConfigDict
 from holoqa import browser, plan as plans, report, workspace
 from holoqa.desktop_codex import CodexSession
 from holoqa.desktop_authoring import PlanAuthor, validate_yaml
+from holoqa.desktop_secrets import ProjectEnvironment
 from holoqa.run import Run
 from holoqa.storage import atomic_json
 
@@ -41,6 +43,7 @@ class DesktopError(ValueError):
 class Engine:
     def __init__(self, state_dir: Path, emit=lambda *_: None):
         self.state_dir, self.emit = state_dir, emit
+        self.environment = ProjectEnvironment(state_dir)
         self.author = PlanAuthor(emit, lambda *args, **kwargs: CodexSession(*args, **kwargs))
         self.root: Path | None = None
         self.reviews: dict[str, tuple] = {}
@@ -207,19 +210,73 @@ class Engine:
         candidate = self.contained(path)
         if not candidate.is_file() or candidate.stat().st_size > LIMIT:
             raise DesktopError("Plan must be a file smaller than 1 MiB")
-        plan = plans.load(candidate)
+        variables = {**os.environ, **self.environment.load(self.root)}
+        plan = plans.load(candidate, environ=variables)
         summary = plans.lint(candidate)
         return plan, {"path": str(candidate.relative_to(self.root)), "sha256": plan.source_sha256,
             "app": plan.meta.app, "target": plan.meta.base_url, "stages": [s.model_dump() for s in plan.stages],
             "steps": [s.model_dump() for s in plan.steps], "warnings": summary["warnings"]}
+
+    def environment_digest(self):
+        values = {**os.environ, **self.environment.load(self.root)}
+        encoded = json.dumps(values, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     def review(self, path, digest):
         _, summary = self.load_plan(path)
         if summary["sha256"] != digest:
             raise DesktopError("The plan changed. Reload and review it again.")
         key = uuid.uuid4().hex
-        self.reviews[key] = (summary["path"], digest, summary["target"])
+        self.reviews[key] = (summary["path"], digest, summary["target"], self.environment_digest())
         return {"token": key}
+
+    def environment_rows(self):
+        self._idle()
+        if not self.root:
+            raise DesktopError("Open a project folder first")
+        configured = set(self.environment.names(self.root))
+        referenced = set()
+        pattern = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+        for parent, dirs, files in os.walk(self.root, followlinks=False):
+            rel = Path(parent).relative_to(self.root)
+            dirs[:] = [d for d in dirs if d not in SKIP and not (Path(parent) / d).is_symlink()]
+            if len(rel.parts) >= 3:
+                dirs[:] = []
+            for name in files:
+                if name == "holoqa.plan.yaml" or name.endswith((".plan.yaml", ".plan.yml")):
+                    candidate = Path(parent) / name
+                    if candidate.is_file() and candidate.stat().st_size <= LIMIT:
+                        try:
+                            referenced.update(pattern.findall(candidate.read_text("utf-8")))
+                        except (OSError, UnicodeError):
+                            continue
+        return [{"name": name, "configured": name in configured, "referenced": name in referenced}
+                for name in sorted(configured | referenced)]
+
+    def set_environment(self, name, value):
+        self._idle()
+        if not self.root:
+            raise DesktopError("Open a project folder first")
+        self.environment.validate(name, value)
+        values = self.environment.load(self.root)
+        values[name] = value
+        self.environment.save(self.root, values)
+        self.reviews.clear()
+        self.emit("environment.updated", {})
+        return self.environment_rows()
+
+    def delete_environment(self, name):
+        self._idle()
+        if not self.root:
+            raise DesktopError("Open a project folder first")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,127}", name):
+            raise DesktopError("Choose a valid environment variable")
+        values = self.environment.load(self.root)
+        values.pop(name, None)
+        self.environment.save(self.root, values)
+        self.reviews.clear()
+        self.emit("environment.updated", {})
+        return self.environment_rows()
 
     def create_plan(self, app, url):
         self._idle()
@@ -286,9 +343,10 @@ class Engine:
         reviewed = self.reviews.get(token)
         if not reviewed:
             raise DesktopError("Review the complete plan before starting")
-        path, digest, target = reviewed
+        path, digest, target, environment_digest = reviewed
         plan, summary = self.load_plan(path)
-        if summary["sha256"] != digest or summary["target"] != target:
+        if (summary["sha256"] != digest or summary["target"] != target
+                or self.environment_digest() != environment_digest):
             self.reviews.pop(token, None)
             raise DesktopError("Plan or resolved target changed. Review again.")
         if not target.startswith(("http://", "https://")) or "${" in target:
@@ -504,6 +562,7 @@ class Engine:
         if method == "hello":
             return {"protocol": PROTOCOL, "recent": self.recent(), "project": self.project(),
                     "provider": self.provider_status, "browserInstalled": bool(shutil.which("agent-browser")),
+                    "planProviders": {name: bool(shutil.which(name)) for name in ("codex", "claude", "opencode")},
                     "qaTools": [tool["name"] for tool in self._specs()]}
         if method == "plan.draft.cancel":
             return self.author.cancel()
@@ -535,6 +594,12 @@ class Engine:
                 return self.load_plan(params["path"])[1]
             if method == "plan.review":
                 return self.review(params["path"], params["sha256"])
+            if method == "environment.list":
+                return self.environment_rows()
+            if method == "environment.set":
+                return self.set_environment(params.get("name"), params.get("value"))
+            if method == "environment.delete":
+                return self.delete_environment(params.get("name"))
             if method == "plan.create":
                 return self.create_plan(params["app"], params["url"])
             if method == "plan.draft.snapshot":
@@ -550,7 +615,7 @@ class Engine:
                 if method == "plan.attachment.remove":
                     return self.author.remove(params["id"])
                 if method == "plan.draft.start":
-                    return self.author.start(self.root, params["app"], params["url"], params["prompt"], params.get("attachments", []))
+                    return self.author.start(self.root, params["app"], params["url"], params["prompt"], params.get("attachments", []), params.get("provider", "codex"))
                 if self.author.state != "ready":
                     raise DesktopError("Generate or import a valid draft before saving")
                 content, filename = params["yaml"], params["filename"]

@@ -18,6 +18,8 @@
         "height": 1000,
         "minWidth": 800,
         "minHeight": 650,
+        "decorations": false,
+        "shadow": true,
         "backgroundColor": "#09080f"
       }
     ],

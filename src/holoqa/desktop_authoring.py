@@ -4,6 +4,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import os
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -12,6 +15,7 @@ import uuid
 
 from holoqa import plan as plans
 from holoqa.desktop_documents import read_document
+from holoqa.agent import PROVIDERS, _provider_command
 
 ACTIVE = {'attaching', 'starting', 'generating', 'cancelling', 'finishing'}
 MAX_YAML = 200_000
@@ -66,6 +70,7 @@ class PlanAuthor:
         self.content = self.error = ''
         self.summary = None
         self.session = None
+        self.process = None
         self.worker = None
         self.generation = 0
         self.cancel_event = threading.Event()
@@ -172,8 +177,12 @@ class PlanAuthor:
             self.state, self.content, self.summary, self.error = 'ready', content, summary, ''
             return self.snapshot()
 
-    def start(self, root, app, url, prompt, ids):
+    def start(self, root, app, url, prompt, ids, provider='codex'):
         validate_inputs(app, url)
+        if provider not in PROVIDERS:
+            raise ValueError('Choose Codex, Claude, or OpenCode for plan generation.')
+        if not shutil.which(provider):
+            raise ValueError(f'{provider} is not installed or not on PATH.')
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 16_000:
             raise ValueError('Describe what to test in 1–16,000 characters.')
         with self.lock:
@@ -228,13 +237,13 @@ class PlanAuthor:
                   'description': 'Validate and return a complete proposed plan. Does not save or execute it.',
                   'inputSchema': {'type': 'object', 'properties': {'yaml': {'type': 'string'}},
                                   'required': ['yaml'], 'additionalProperties': False}}]
-        worker = threading.Thread(target=self._generate, args=(root, generation, url, app, full_prompt, instructions, specs), daemon=True)
+        worker = threading.Thread(target=self._generate, args=(root, generation, url, app, full_prompt, instructions, specs, provider), daemon=True)
         self.notify()
         worker.start()
         self.worker = worker
         return self.snapshot()
 
-    def _generate(self, root, generation, target, app, prompt, instructions, specs):
+    def _generate(self, root, generation, target, app, prompt, instructions, specs, provider='codex'):
         session = None
         error = ''
         deadline = time.monotonic() + 300
@@ -284,6 +293,16 @@ class PlanAuthor:
                 if name == 'holoqa_ask_question':
                     return ask(name, arguments)
                 return submit(name, arguments)
+            if provider != 'codex':
+                with self.lock:
+                    if generation != self.generation or self.state != 'starting':
+                        return
+                    self.state = 'generating'
+                self.notify()
+                self._generate_cli(root, generation, target, app, prompt, instructions, provider, deadline)
+                if not self.content:
+                    raise ValueError(f'{provider} returned no valid plan. Refine the request and try again.')
+                return
             session = self.session_factory(root, self.emit, tool, allow_commands=False)
             timer = threading.Timer(max(0, deadline - time.monotonic()), session.close)
             timer.daemon = True
@@ -318,6 +337,11 @@ class PlanAuthor:
                     self.state = 'finishing'
             if session:
                 session.close()
+            process = self.process
+            if process and process.poll() is None:
+                process.kill()
+                process.communicate()
+            self.process = None
             with self.lock:
                 self.session = None
                 cancelled = cancelled or self.state == 'cancelling' or generation != self.generation
@@ -327,6 +351,119 @@ class PlanAuthor:
                     self.content, self.summary = '', None
             self.notify()
 
+    def _generate_cli(self, root, generation, target, app, prompt, instructions, provider, deadline):
+        """Run an installed CLI with read-only project tools and a strict output contract."""
+        answer_context = ''
+        for _ in range(9):
+            if self.cancel_event.is_set():
+                raise ValueError('Plan generation was cancelled.')
+            contract = (instructions + '\nYou must respond with exactly one JSON object and no markdown. '
+                        'For an unresolved decision use {"kind":"question","question":"...","options":["...","..."]}. '
+                        'When ready use {"kind":"plan","yaml":"complete YAML string"}. '
+                        'Do not create or edit files, execute commands, or browse the network.\n')
+            full = contract + prompt + answer_context
+            binary = shutil.which(provider)
+            with tempfile.TemporaryDirectory(prefix='holoqa-plan-agent-') as temp:
+                env = dict(os.environ)
+                if provider == 'claude':
+                    command = _provider_command(binary, ['-p', '--output-format', 'json', '--permission-mode', 'dontAsk',
+                        '--tools', 'Read,Glob,Grep', '--disallowedTools', 'Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch', full])
+                else:
+                    config = Path(temp) / 'opencode.json'
+                    config.write_text(json.dumps({'permission': {'*': 'deny', 'read': 'allow', 'glob': 'allow', 'grep': 'allow'}}), encoding='utf-8')
+                    env['OPENCODE_CONFIG'] = str(config)
+                    command = _provider_command(binary, ['run', '--format', 'json', full])
+                process = subprocess.Popen(command, cwd=root, env=env, stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+                with self.lock:
+                    self.process = process
+                stdout = ''
+                while process.poll() is None:
+                    if self.cancel_event.wait(.15):
+                        process.kill()
+                        break
+                    if time.monotonic() >= deadline:
+                        process.kill()
+                        raise ValueError('Plan generation exceeded five minutes. Shorten the request and try again.')
+                    try:
+                        stdout, _ = process.communicate(timeout=.15)
+                    except subprocess.TimeoutExpired:
+                        continue
+                if process.poll() is not None and not stdout:
+                    stdout, stderr = process.communicate()
+                else:
+                    stderr = ''
+                self.process = None
+                if self.cancel_event.is_set():
+                    raise ValueError('Plan generation was cancelled.')
+                if process.returncode:
+                    raise ValueError((stderr or f'{provider} exited with status {process.returncode}')[-2500:])
+            response = self._parse_cli_response(provider, stdout)
+            if response.get('kind') == 'question':
+                question, options = response.get('question'), response.get('options')
+                if not isinstance(question, str) or not question.strip() or len(question) > 1200 or not isinstance(options, list) or not 2 <= len(options) <= 4 or any(not isinstance(o, str) or not o.strip() or len(o) > 300 for o in options):
+                    raise ValueError('The selected coding agent returned an invalid question.')
+                with self.lock:
+                    self.question = {'id': uuid.uuid4().hex, 'question': question.strip(), 'options': options}
+                    self.question_answer = None
+                    self.question_event.clear()
+                self.notify()
+                while not self.question_event.wait(.25):
+                    if self.cancel_event.is_set():
+                        raise ValueError('Plan generation was cancelled.')
+                with self.lock:
+                    chosen = self.question_answer
+                    self.question = self.question_answer = None
+                answer_context += '\nUser decision for the agent question: ' + json.dumps({'question': question, 'answer': chosen}, ensure_ascii=False) + '\nContinue the repository analysis and return the next question or final plan.\n'
+                continue
+            if response.get('kind') != 'plan' or not isinstance(response.get('yaml'), str):
+                raise ValueError(f'{provider} returned an invalid response. Retry or choose another provider.')
+            content = response['yaml']
+            summary = validate_yaml(content, target)
+            if summary['app'] != app:
+                raise ValueError('Keep the requested application name.')
+            with self.lock:
+                if generation != self.generation or self.state != 'generating':
+                    raise ValueError('This draft request expired.')
+                self.content, self.summary = content, summary
+            self.notify()
+            return
+        raise ValueError('The agent asked too many follow-up questions. Refine the request and try again.')
+
+    @staticmethod
+    def _parse_cli_response(provider, stdout):
+        candidates = []
+        if provider == 'claude':
+            try:
+                outer = json.loads(stdout)
+                candidates.append(outer.get('result', '') if isinstance(outer, dict) else '')
+            except ValueError:
+                pass
+        else:
+            chunks = []
+            for line in stdout.splitlines():
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict):
+                    part = event.get('part', {})
+                    if isinstance(part, dict) and isinstance(part.get('text'), str):
+                        chunks.append(part['text'])
+                    if isinstance(event.get('text'), str):
+                        chunks.append(event['text'])
+            candidates.append(''.join(chunks))
+        for value in candidates:
+            if isinstance(value, str):
+                value = value.strip()
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except ValueError:
+                    pass
+        raise ValueError(f'{provider} did not return the required structured plan response.')
+
     def cancel(self):
         with self.lock:
             if not self.active:
@@ -335,9 +472,12 @@ class PlanAuthor:
             self.state = 'cancelling'
             self.question_event.set()
             session = self.session
+            process = self.process
             worker = self.worker
         if session:
             session.close()
+        if process and process.poll() is None:
+            process.kill()
         if worker and worker is not threading.current_thread():
             worker.join(timeout=10)
         self.notify()
