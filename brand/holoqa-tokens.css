@@ -1,0 +1,15 @@
+/* HoloQA Silver Editorial palette — shared brand tokens */
+:root {
+  --hq-primary: #1A12C8;
+  --hq-background: #0E0E12;
+  --hq-surface: #18181E;
+  --hq-border: #30303A;
+  --hq-text: #F7F7F9;
+  --hq-silver: #E4E4E7;
+  --hq-muted: #B9BAC2;
+  --hq-accent: #7C76FF;
+  --hq-accent-light: #8F89FF;
+  --hq-pass: #62D77B;
+  --hq-fail: #EF6464;
+  --hq-hold: #F5BD5A;
+}

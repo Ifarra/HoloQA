@@ -14,7 +14,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
+import signal
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -61,6 +64,7 @@ class Engine:
         self.state_changed = threading.Event()
         self.closing = False
         self.provider_status = {"installed": bool(shutil.which("codex")), "authentication": "unchecked"}
+        self.app_process: subprocess.Popen | None = None
 
     @property
     def lifecycle(self):
@@ -172,6 +176,7 @@ class Engine:
         root = Path(path).expanduser().resolve()
         if not root.is_dir():
             raise DesktopError("Select an existing project directory")
+        self.stop_application()
         self.author.reset()
         self.root, self.reviews, self.run = root, {}, None
         recent = [str(root)] + [p for p in self.recent() if p != str(root)]
@@ -313,6 +318,96 @@ class Engine:
         finally:
             session.close()
         return self.provider_status
+
+    def preflight(self, path, provider_name="codex", reviewed_sha256=""):
+        """Check all launch prerequisites without changing project or run state."""
+        plan, summary = self.load_plan(path)
+        target = summary["target"]
+        plan_unchanged=not reviewed_sha256 or summary["sha256"]==reviewed_sha256
+        checks = [{"id":"plan", "label":"Plan is valid and reviewed", "ok":plan_unchanged,
+                   "detail": ("Plan parsed and checks are ready" if not summary["warnings"] else f"Valid · {len(summary['warnings'])} review note(s)") if plan_unchanged else "Plan changed after review. Reload and review it again."},
+                  {"id":"target", "label":"Application target", "ok":bool(target and "${" not in target),
+                   "detail":target or "Set the plan base_url and resolve its variables"},
+                  {"id":"browser", "label":"Browser driver", "ok":bool(shutil.which("agent-browser")),
+                   "detail":"agent-browser detected" if shutil.which("agent-browser") else "Install agent-browser and its browser runtime"},
+                  {"id":"provider", "label":provider_name.title()+" connection", "ok":False,
+                   "detail":"Check the coding agent connection"}]
+        if provider_name not in {"codex", "claude"}:
+            raise DesktopError("Choose Codex or Claude Code for this scan")
+        if checks[1]["ok"]:
+            from urllib.parse import urlparse
+            parsed=urlparse(target)
+            checks[1]["ok"]=parsed.scheme in {"http","https"} and bool(parsed.hostname)
+        if checks[1]["ok"]:
+            try:
+                from urllib.request import Request, urlopen
+                with urlopen(Request(target, method="HEAD"), timeout=2) as response:
+                    checks[1]["detail"] = f"Responding · HTTP {response.status}"
+            except Exception as error:
+                checks[1]["ok"] = False
+                checks[1]["detail"] = f"Not responding at {target} ({str(error)[:120]})"
+        try:
+            status=self.check_provider(provider_name)
+            checks[3]["ok"]=status["authentication"]=="ready"
+            checks[3]["detail"]="Installed and signed in" if checks[3]["ok"] else f"{status['authentication']} · sign in with {provider_name}"
+        except Exception as error:
+            checks[3]["detail"]=str(error)[:180]
+        return {"checks":checks,"ready":all(check["ok"] for check in checks),"target":target,
+                "provider":provider_name,"plan":summary["path"]}
+
+    def start_application(self, command, target):
+        if not self.root:
+            raise DesktopError("Open a project folder first")
+        if self.app_process and self.app_process.poll() is None:
+            raise DesktopError("HoloQA already started an application process")
+        if not isinstance(command, str) or len(command) > 1000:
+            raise DesktopError("Enter a startup command shorter than 1000 characters")
+        try:
+            args=shlex.split(command, posix=os.name != "nt")
+        except ValueError as error:
+            raise DesktopError(f"Invalid startup command: {error}") from error
+        if not args or Path(args[0]).name.lower().removesuffix(".cmd").removesuffix(".exe") not in {"npm","pnpm","yarn","bun","uv","python","python3"}:
+            raise DesktopError("For safety, startup commands must begin with npm, pnpm, yarn, bun, uv, or python")
+        from urllib.parse import urlparse
+        parsed=urlparse(target or "")
+        if parsed.scheme not in {"http","https"} or not parsed.hostname:
+            raise DesktopError("Set a valid HTTP or HTTPS application URL first")
+        kwargs={"cwd":str(self.root),"stdin":subprocess.DEVNULL,"stdout":subprocess.DEVNULL,"stderr":subprocess.DEVNULL}
+        if os.name == "nt":kwargs["creationflags"]=getattr(subprocess,"CREATE_NEW_PROCESS_GROUP",0)
+        else:kwargs["start_new_session"]=True
+        try:self.app_process=subprocess.Popen(args, **kwargs)
+        except OSError as error:raise DesktopError(f"Could not start the application: {error}") from error
+        from urllib.request import Request,urlopen
+        deadline=time.monotonic()+15
+        while time.monotonic()<deadline:
+            if self.app_process.poll() is not None:
+                self.app_process=None
+                raise DesktopError("The application process exited before the target became ready")
+            try:
+                with urlopen(Request(target,method="HEAD"),timeout=1) as response:
+                    return {"message":f"Application is responding · HTTP {response.status}","pid":self.app_process.pid}
+            except Exception:time.sleep(.25)
+        self.stop_application()
+        raise DesktopError("Application did not respond within 15 seconds; HoloQA stopped the process")
+
+    def stop_application(self):
+        process,self.app_process=self.app_process,None
+        if process and process.poll() is None:
+            if os.name == "nt":
+                # npm and other package managers leave their dev server in a child process.
+                subprocess.run(["taskkill","/PID",str(process.pid),"/T","/F"],stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+            else:
+                try:os.killpg(process.pid,signal.SIGTERM)
+                except ProcessLookupError:pass
+            try:process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                if os.name=="nt":process.kill()
+                else:
+                    try:os.killpg(process.pid,signal.SIGKILL)
+                    except ProcessLookupError:pass
+                process.wait(timeout=2)
+        return {"message":"Application process stopped"}
 
     def _specs(self):
         from holoqa import mcp
@@ -579,6 +674,12 @@ class Engine:
                     "provider": self.provider_status, "browserInstalled": bool(shutil.which("agent-browser")),
                     "planProviders": {name: bool(shutil.which(name)) for name in ("codex", "claude", "opencode")},
                     "qaTools": [tool["name"] for tool in self._specs()]}
+        if method == "run.preflight":
+            return self.preflight(params.get("path", ""), params.get("provider", "codex"), params.get("sha256", ""))
+        if method == "application.start":
+            return self.start_application(params.get("command"), params.get("target"))
+        if method == "application.stop":
+            return self.stop_application()
         if method == "plan.draft.cancel":
             return self.author.cancel()
         if method == "plan.draft.answer":
@@ -718,6 +819,7 @@ def main():
             engine.closing = True
             engine.author.cancel()
             engine.stop()
+            engine.stop_application()
 
 
 if __name__ == "__main__":

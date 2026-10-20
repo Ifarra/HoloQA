@@ -1,6 +1,6 @@
 # HoloQA changelog
 
-## 2.1.0 — Unreleased
+## 2.1.0 — Bundled with Desktop 0.3.0 Preview (2026-10-20)
 
 - Plan related checks as staged user journeys, reuse actors and captured evidence where appropriate, and retain distinct verdicts for meaningful state changes.
 - Reduce browser contention with per-session command serialization while allowing separate actor sessions to proceed independently; constrain excessive tabs and clean up owned sessions safely.

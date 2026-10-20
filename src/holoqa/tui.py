@@ -221,9 +221,9 @@ class HoloQATui(App[None]):
     #run-title { display: none; }
     #step-scroll { height: 1fr; overflow-y: auto; scrollbar-size: 1 1; }
     #step-table { height: auto; min-height: 1fr; padding: 0; }
-    .step-row { height: 5; padding: 1 2; color: #afbdca; }
-    .step-pass { color: #cbd7e2; }
-    .step-current { background: #132a3a; color: #46e5f0; border-left: thick #46e5f0; }
+    .step-row { height: 5; padding: 1 2; color: #b9bac2; }
+    .step-pass { color: #e4e4e7; }
+    .step-current { background: #18181e; color: #8f89ff; border-left: thick #8f89ff; }
     #workspace { width: 74%; }
     #run-header { height: 4; padding: 1 2; border-bottom: solid $panel; }
     #activity { width: 1fr; height: 1; color: $accent; text-style: bold; }
@@ -464,8 +464,8 @@ class HoloQATui(App[None]):
             f"{self.state.title}\n{self.state.provider} / {self.state.mode} / {self.state.run_id}"
         )
         status = Text()
-        status.append(f"{self.state.activity.title()}...", style="#46e5f0")
-        status.append(f"    {self.state.safety}", style="#8299ad")
+        status.append(f"{self.state.activity.title()}...", style="#8f89ff")
+        status.append(f"    {self.state.safety}", style="#b9bac2")
         if self.state.activity == "ERROR":
             status.append("    [details]", style=Style(color="#ef6464", underline=False, meta={"@click": "app.show_error"}))
         self.query_one("#safety", Static).update(status)
@@ -488,8 +488,8 @@ class HoloQATui(App[None]):
         ):
             click = Style(underline=False, meta={"@click": f"app.{action}"})
             start = len(shortcuts)
-            shortcuts.append(f"[{key}]", style="#46e5f0")
-            shortcuts.append(f" {label}  ", style="#b7c6d3")
+            shortcuts.append(f"[{key}]", style="#8f89ff")
+            shortcuts.append(f" {label}  ", style="#e4e4e7")
             shortcuts.stylize(click, start, len(shortcuts))
         self.query_one("#shortcuts", Static).update(shortcuts)
         self.query_one("#meta", Static).update(
@@ -502,7 +502,7 @@ class HoloQATui(App[None]):
     def _render_verdict(self, counts: dict[str, int]) -> None:
         verdict_title = Text("Run Verdict")
         verdict_title.append("                         ")
-        verdict_title.append("···", style=Style(color="#8299ad", underline=False, meta={"@click": "app.show_run_menu"}))
+        verdict_title.append("···", style=Style(color="#b9bac2", underline=False, meta={"@click": "app.show_run_menu"}))
         self.query_one("#verdict-title", Static).update(verdict_title)
         compact = self.has_class("compact")
         separator = "\n" if compact else "\n\n"
@@ -510,7 +510,7 @@ class HoloQATui(App[None]):
             f"[bold #62d77b]{counts['PASS']:>2}[/]    [#62d77b]PASS[/]{separator}"
             f"[bold #ef6464]{counts['FAIL']:>2}[/]    [#ef6464]FAIL[/]{separator}"
             f"[bold #f5bd5a]{counts['BLOCKED']:>2}[/]    BLOCKED{separator}"
-            f"[bold #8da4b8]{counts['PENDING']:>2}[/]    PENDING"
+            f"[bold #b9bac2]{counts['PENDING']:>2}[/]    PENDING"
         )
         done = counts["PASS"] + counts["FAIL"] + counts["BLOCKED"]
         total = len(self.state.steps)
@@ -520,10 +520,10 @@ class HoloQATui(App[None]):
         progress_label = f"Progress  {done}/{total or 0}" if compact else f"Progress                         {done}/{total or 0}"
         estimate_label = self._estimated_remaining() if compact else f"Est. remaining: {self._estimated_remaining()}"
         self.query_one("#progress", Static).update(
-            f"{progress_label}\n[#46e5f0]{bar[:filled]}[/][#203543]{bar[filled:]}[/]\n{estimate_label}"
+            f"{progress_label}\n[#8f89ff]{bar[:filled]}[/][#30303a]{bar[filled:]}[/]\n{estimate_label}"
         )
         self.query_one("#steps-header", Static).update(
-            f"[bold #e8eef4]Steps[/]    [#aab9c6]{done}/{total or 0}[/]"
+            f"[bold #f7f7f9]Steps[/]    [#b9bac2]{done}/{total or 0}[/]"
         )
         self._render_steps()
         detail = next(
@@ -535,11 +535,11 @@ class HoloQATui(App[None]):
         detail = detail or (self.state.steps[-1] if self.state.steps else None)
         if detail:
             self.query_one("#detail", Static).update(
-                f"[bold #e8eef4]Step {detail[0]} — {detail[1]}[/]\n\n"
-                f"[#8299ad]Status[/]      [bold #46e5f0]{detail[2]}[/]\n"
-                f"[#8299ad]Run ID[/]      {self.state.run_id}\n"
-                f"[#8299ad]Provider[/]    {self.state.provider}\n"
-                f"[#8299ad]Authority[/]   HoloQA verdict engine"
+                f"[bold #f7f7f9]Step {detail[0]} — {detail[1]}[/]\n\n"
+                f"[#b9bac2]Status[/]      [bold #8f89ff]{detail[2]}[/]\n"
+                f"[#b9bac2]Run ID[/]      {self.state.run_id}\n"
+                f"[#b9bac2]Provider[/]    {self.state.provider}\n"
+                f"[#b9bac2]Authority[/]   HoloQA verdict engine"
             )
             self._render_artifacts(detail[0])
             self._render_assertions(detail[0], detail[2])
@@ -567,34 +567,34 @@ class HoloQATui(App[None]):
         if self.selected_artifact_index not in valid_indices:
             self.selected_artifact_index = artifacts[0][0]
         output = Text()
-        output.append("Captured evidence\n\n", style="bold #e8eef4")
+        output.append("Captured evidence\n\n", style="bold #f7f7f9")
         for index, item in artifacts:
             selected = index == self.selected_artifact_index
             marker = "›" if selected else " "
             start = len(output)
             output.append(
                 f"{marker} {item.step_id}: {item.name}  [{item.kind}]\n",
-                style="#46e5f0 on #132a3a" if selected else "#c8d3df",
+                style="#8f89ff on #18181e" if selected else "#e4e4e7",
             )
             output.stylize(Style(underline=False, meta={"@click": f"app.open_artifact({index})"}), start, len(output))
         item = self.state.artifacts[self.selected_artifact_index]
-        output.append("\nEnter/click open  x copy path  e reveal\n", style="#8299ad")
+        output.append("\nEnter/click open  x copy path  e reveal\n", style="#b9bac2")
         if item.path:
-            output.append(str(item.path), style="#8299ad")
+            output.append(str(item.path), style="#b9bac2")
         self.query_one("#evidence", Static).update(output)
 
     def _render_assertions(self, step_id: str, verdict: str) -> None:
         assertions = self.state.assertions.get(step_id, [])
         if not assertions:
             self.query_one("#assertions", Static).update(
-                f"[bold #e8eef4]Assertion status[/]\n\n"
+                f"[bold #f7f7f9]Assertion status[/]\n\n"
                 f"Step {step_id} is {verdict}.\n"
                 "Detailed assertion results appear after HoloQA judges the step."
             )
             return
         self.selected_assertion_index = min(self.selected_assertion_index, len(assertions) - 1)
         output = Text()
-        output.append("Assertions\n\n", style="bold #e8eef4")
+        output.append("Assertions\n\n", style="bold #f7f7f9")
         for index, item in enumerate(assertions):
             icon = "✓" if item.passed is True else ("×" if item.passed is False else "○")
             color = "#62d77b" if item.passed is True else ("#ef6464" if item.passed is False else "#f5bd5a")
@@ -602,11 +602,11 @@ class HoloQATui(App[None]):
             start = len(output)
             output.append(
                 f"{'›' if selected else ' '} {icon} {item.kind}\n",
-                style=f"{color}{' on #132a3a' if selected else ''}",
+                style=f"{color}{' on #18181e' if selected else ''}",
             )
             output.stylize(Style(underline=False, meta={"@click": f"app.select_assertion({index})"}), start, len(output))
         current = assertions[self.selected_assertion_index]
-        output.append(f"\n{current.detail}", style="#c8d3df")
+        output.append(f"\n{current.detail}", style="#e4e4e7")
         self.query_one("#assertions", Static).update(output)
 
     def _elapsed_seconds(self) -> str:
@@ -641,7 +641,7 @@ class HoloQATui(App[None]):
                     members = [row for row in self.state.steps if self.state.step_groups.get(row[0]) == group_id]
                     done = sum(row[2] in {"PASS", "FAIL", "BLOCKED"} for row in members)
                     start = len(output)
-                    output.append(f"> {group_title}  {done}/{len(members)}\n", style="bold #8299ad")
+                    output.append(f"> {group_title}  {done}/{len(members)}\n", style="bold #b9bac2")
                     output.stylize(
                         Style(underline=False, meta={"@click": f"app.toggle_group('{group_id}')"}),
                         start, len(output),
@@ -658,9 +658,9 @@ class HoloQATui(App[None]):
                 marker = "›"
             color = {
                 "PASS": "#62d77b", "FAIL": "#ef6464", "BLOCKED": "#f5bd5a",
-                "IN PROGRESS": "#46e5f0", "PENDING": "#718ba0",
-            }.get(verdict, "#718ba0")
-            row_style = "on #1d3b4c" if selected else ("on #132a3a" if active else "")
+                "IN PROGRESS": "#8f89ff", "PENDING": "#b9bac2",
+            }.get(verdict, "#b9bac2")
+            row_style = "on #30303a" if selected else ("on #18181e" if active else "")
             click = Style(underline=False, meta={"@click": f"app.select_step('{step_id}')"})
             first = f" {marker}  {step_id:<3} {title}"
             second = f"       {verdict}"
@@ -739,9 +739,9 @@ class HoloQATui(App[None]):
             return
         log.max_lines = 2000
         rendered = Text()
-        rendered.append(entry.timestamp, style="#8299ad")
-        rendered.append(f"  {entry.source:<16}  ", style="#46e5f0")
-        rendered.append(entry.message, style="#ef6464" if entry.message.startswith("ERROR:") else "#c8d3df")
+        rendered.append(entry.timestamp, style="#b9bac2")
+        rendered.append(f"  {entry.source:<16}  ", style="#8f89ff")
+        rendered.append(entry.message, style="#ef6464" if entry.message.startswith("ERROR:") else "#e4e4e7")
         if entry.step_id:
             rendered.stylize(Style(meta={"@click": f"app.select_step('{entry.step_id}')"}), 0, len(rendered))
         log.write(rendered, scroll_end=not self.transcript_paused)
@@ -1104,9 +1104,9 @@ class HoloQATui(App[None]):
             step_label = f"Step {current_index + 1:02d}/{len(self.state.steps):02d}    {step[1]}"
         else:
             step_label = self.state.activity_detail
-        color = "#ef6464" if self.state.activity == "ERROR" else "#46e5f0"
+        color = "#ef6464" if self.state.activity == "ERROR" else "#8f89ff"
         self.query_one("#activity", Static).update(
-            f"[bold {color}]●  {self.state.activity}[/]    [#8299ad]{step_label}[/]"
+            f"[bold {color}]●  {self.state.activity}[/]    [#b9bac2]{step_label}[/]"
         )
         step_elapsed = (
             time.monotonic() - self._last_event_monotonic
@@ -1913,7 +1913,7 @@ class HoloQATui(App[None]):
     @staticmethod
     def _overlay_action(output: Text, label: str, action: str) -> None:
         start = len(output)
-        output.append(f"  {label}\n", style="#46e5f0")
+        output.append(f"  {label}\n", style="#8f89ff")
         output.stylize(Style(underline=False, meta={"@click": f"app.{action}"}), start, len(output))
 
     def _show_overlay(self, content: Text) -> None:
@@ -2332,7 +2332,7 @@ class HoloQATui(App[None]):
 
     def action_show_help(self) -> None:
         content = Text()
-        content.append("Keyboard & mouse\n\n", style="bold #e8eef4")
+        content.append("Keyboard & mouse\n\n", style="bold #f7f7f9")
         content.append(
             "↑/↓ select item   Enter open   f follow live\n"
             "1 details   2 evidence   3 assertions\n"
@@ -2341,14 +2341,14 @@ class HoloQATui(App[None]):
             "s sessions (switch runs)   t retest   g continue\n"
             "w workspaces (switch plan)\n"
             "Click steps, artifacts, assertions, header actions, or verdict ···\n\n",
-            style="#c8d3df",
+            style="#e4e4e7",
         )
         self._overlay_action(content, "Close", "close_overlay")
         self._show_overlay(content)
 
     def action_show_run_menu(self) -> None:
         content = Text()
-        content.append("Run actions\n\n", style="bold #e8eef4")
+        content.append("Run actions\n\n", style="bold #f7f7f9")
         self._overlay_action(content, "Workspaces — switch application/plan (w)", "show_workspaces")
         self._overlay_action(content, "Sessions — switch runs (s)", "show_sessions")
         self._overlay_action(content, "Retest — new run, keep this one (t)", "retest")
@@ -2364,7 +2364,7 @@ class HoloQATui(App[None]):
     def action_show_error(self) -> None:
         content = Text()
         content.append("Agent error\n\n", style="bold #ef6464")
-        content.append(self._last_error or self.state.activity_detail, style="#c8d3df")
+        content.append(self._last_error or self.state.activity_detail, style="#e4e4e7")
         content.append("\n\n")
         self._overlay_action(content, "Copy diagnostics", "copy_diagnostics")
         self._overlay_action(content, "Retry provider startup", "retry")

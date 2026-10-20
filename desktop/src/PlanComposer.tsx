@@ -4,7 +4,7 @@ import {events, pickPlanFiles, rpc, type Draft, type Hello, type Plan} from './b
 
 const empty:Draft={state:'idle',yaml:'',error:'',summary:null,question:null,attachments:[]};
 const isActive=(state:string)=>['attaching','starting','generating','cancelling','finishing'].includes(state);
-export function PlanComposer({app,target,blocked,onSaved,onStarter}:{app:string;target:string;blocked:boolean;onSaved:(plan:Plan)=>Promise<void>;onStarter:()=>void}) {
+export function PlanComposer({app,target,projectPath,blocked,onSaved,onStarter}:{app:string;target:string;projectPath:string;blocked:boolean;onSaved:(plan:Plan)=>Promise<void>;onStarter:()=>void}) {
   const [draft,setDraft]=useState<Draft>(empty);
   const [name,setName]=useState(app);
   const [url,setUrl]=useState(target);
@@ -19,6 +19,11 @@ export function PlanComposer({app,target,blocked,onSaved,onStarter}:{app:string;
   const [showRaw,setShowRaw]=useState(false);
   const [error,setError]=useState('');
   const [working,setWorking]=useState(false);
+  const [recovery,setRecovery]=useState<{app:string;url:string;prompt:string;yaml:string;filename:string}|null>(null);
+  const [storageReady,setStorageReady]=useState(false);
+  useEffect(()=>{try{const saved=localStorage.getItem(`holoqa:plan-agent:${projectPath}`);if(saved==='codex'||saved==='claude'||saved==='opencode')setPlanProvider(saved);}catch{}},[projectPath]);
+  useEffect(()=>{setStorageReady(false);try{const saved=localStorage.getItem(`holoqa:draft:${projectPath}`);if(saved){const parsed=JSON.parse(saved);if(parsed&&typeof parsed.prompt==='string'&&(parsed.prompt||parsed.yaml))setRecovery(parsed);}}catch{}finally{setStorageReady(true);}},[projectPath]);
+  useEffect(()=>{if(!storageReady)return;try{localStorage.setItem(`holoqa:draft:${projectPath}`,JSON.stringify({app:name,url,prompt,yaml,filename}));}catch{}},[projectPath,storageReady,name,url,prompt,yaml,filename]);
   const generating=isActive(draft.state);
   const disabled=working||generating||blocked;
   useEffect(()=>{let live=true;rpc<Hello>('hello').then(value=>{if(live&&value.planProviders)setProviders(value.planProviders);}).catch(()=>{});return()=>{live=false;};},[]);
@@ -34,9 +39,11 @@ export function PlanComposer({app,target,blocked,onSaved,onStarter}:{app:string;
   const generate=()=>action(async()=>{const result=await rpc<Draft>('plan.draft.start',{app:name,url,prompt,provider:planProvider,attachments:draft.attachments.map(d=>d.id)});setDraft(result);setYaml(result.yaml);serverYaml.current=result.yaml;});
   const save=()=>action(async()=>onSaved(await rpc<Plan>('plan.draft.save',{yaml,filename})));
   const answer=(id:string,value:string)=>action(async()=>setDraft(await rpc<Draft>('plan.draft.answer',{id,answer:value})));
+  const restore=()=>{if(!recovery)return;setName(recovery.app||app);setUrl(recovery.url||target);setPrompt(recovery.prompt);setYaml(recovery.yaml);setFilename(recovery.filename||'generated.plan.yaml');serverYaml.current='';setRecovery(null);};
   return <section className="plan-composer">
     <div className="page-heading"><div><h1>Create a test plan</h1><p>Describe the journeys. Bring your requirements. Review the draft before running.</p></div><button className="button secondary" disabled={disabled} onClick={()=>void pick('plan')}><FolderOpen size={15}/> Import plan file</button></div>
     {blocked&&<div className="banner">Stop the active QA run before creating a plan.</div>}
+    {recovery&&<div className="draft-recovery"><span><b>Unfinished draft found</b><small>Your prompt and plan edits were saved on this device.</small></span><button className="button secondary" onClick={restore}>Restore draft</button><button className="text-button" onClick={()=>{try{localStorage.removeItem(`holoqa:draft:${projectPath}`);}catch{}setRecovery(null);}}>Discard</button></div>}
     {(error||draft.error)&&<div className="error" role="alert">{error||draft.error}</div>}
     <div className="authoring-grid">
       <section className="card author-request"><span className="eyebrow">DESCRIBE WHAT TO TEST</span><h2>Your requirements, in your words.</h2>
@@ -46,7 +53,7 @@ export function PlanComposer({app,target,blocked,onSaved,onStarter}:{app:string;
         <p className="mini">TXT, Markdown, PDF, DOCX, XLSX · 5 MiB per file · 15 MiB and 100,000 extracted characters total. Excel values are included; formulas, macros, images, and links are ignored. The agent reads the extracted content before proposing checks.</p>
         <ul className="attachment-list">{draft.attachments.map(document=><li key={document.id}><FileText size={16}/><span><strong>{document.name}</strong><small>{Math.ceil(document.size/1024)} KiB · {document.characters.toLocaleString()} characters extracted</small></span><button aria-label={`Remove ${document.name}`} disabled={disabled} onClick={()=>void action(async()=>setDraft(await rpc<Draft>('plan.attachment.remove',{id:document.id})))}><X size={15}/></button></li>)}</ul>
         <p className="author-disclosure">Generating sends your request, project context, and extracted document text to the selected coding agent. Attach only content you intend to share. Originals stay in place; attachment text is held in memory for this project session.</p>
-        <div className="plan-agent-row"><label>Plan coding agent<select aria-label="Plan coding agent" value={planProvider} disabled={disabled} onChange={e=>setPlanProvider(e.target.value)}>{[['codex','Codex'],['claude','Claude Code'],['opencode','OpenCode']].map(([id,label])=><option key={id} value={id} disabled={!providers[id]}>{label}{providers[id]?'':' · not installed'}</option>)}</select></label><span className="mini">Uses the selected CLI's existing sign-in. Plan generation is read-only.</span></div>
+        <div className="plan-agent-row"><label>Plan coding agent<select aria-label="Plan coding agent" value={planProvider} disabled={disabled} onChange={e=>{setPlanProvider(e.target.value);try{localStorage.setItem(`holoqa:plan-agent:${projectPath}`,e.target.value);}catch{}}}>{[['codex','Codex'],['claude','Claude Code'],['opencode','OpenCode']].map(([id,label])=><option key={id} value={id} disabled={!providers[id]}>{label}{providers[id]?'':' · not installed'}</option>)}</select></label><span className="mini">Uses the selected CLI's existing sign-in. Plan generation is read-only.</span></div>
         <p className="mini">Generating again replaces the proposal. Save a draft you want to keep first.</p><div className="actions">{generating?<button className="button danger" disabled={draft.state==='cancelling'||working} onClick={()=>void action(async()=>setDraft(await rpc<Draft>('plan.draft.cancel')))}><Square size={14}/> {draft.state==='attaching'?'Cancel attachments':'Cancel generation'}</button>:<button className="button" disabled={disabled||!prompt.trim()||!name.trim()||!url.trim()} onClick={()=>void generate()}><Sparkles size={15}/> Generate plan with {planProvider==='claude'?'Claude Code':planProvider==='opencode'?'OpenCode':'Codex'}</button>}</div>
         <p className="mini">Already have a plan? Import its YAML above, or open a plan discovered in this project. You can also <button className="text-button" disabled={disabled} onClick={onStarter}>create a starter plan</button>.</p>
       </section>
