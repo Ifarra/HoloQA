@@ -156,7 +156,7 @@ fn backend(state: State<'_, Backend>) -> Result<Arc<Engine>, String> { state.0.c
 
 #[tauri::command]
 async fn engine_request(state: State<'_, Backend>, method: String, params: Value) -> Result<Value, String> {
-    const METHODS: &[&str] = &["hello","project.recent_open","project.refresh","plan.load","plan.review","plan.create","provider.check","run.start","run.pause","run.resume","run.stop","run.snapshot","run.history","run.export","artifact.read","approval.respond"];
+    const METHODS: &[&str] = &["hello","project.recent_open","project.refresh","plan.load","plan.review","plan.create","plan.draft.snapshot","plan.draft.start","plan.draft.cancel","plan.draft.answer","plan.draft.save","plan.attachment.remove","provider.check","run.start","run.pause","run.resume","run.stop","run.snapshot","run.history","run.export","artifact.read","approval.respond"];
     if !METHODS.contains(&method.as_str()) { return Err("Unsupported desktop method".into()); }
     let engine = backend(state)?;
     tauri::async_runtime::spawn_blocking(move || engine.request(&method, params)).await.map_err(|e|e.to_string())?
@@ -173,11 +173,32 @@ async fn open_project(app: tauri::AppHandle, state: State<'_, Backend>) -> Resul
     }).await.map_err(|e|e.to_string())?
 }
 
+#[tauri::command]
+async fn pick_plan_files(app: tauri::AppHandle, state: State<'_, Backend>, kind: String) -> Result<Value, String> {
+    if kind != "documents" && kind != "plan" { return Err("Unsupported file selection".into()); }
+    let engine = backend(state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if kind == "plan" {
+            let picked = app.dialog().file().set_title("Import a HoloQA plan")
+                .add_filter("HoloQA plan", &["yaml", "yml"]).blocking_pick_file();
+            let Some(file) = picked else { return Ok(Value::Null) };
+            engine.request("plan.import", json!({"path":file.into_path().map_err(|e|e.to_string())?}))
+        } else {
+            let picked = app.dialog().file().set_title("Attach requirements documents")
+                .add_filter("Requirements documents", &["txt", "md", "markdown", "pdf", "docx", "xlsx", "xlsm"]).blocking_pick_files();
+            let Some(files) = picked else { return Ok(Value::Null) };
+            if files.len() > 8 { return Err("Attach up to eight documents at a time".into()); }
+            let paths: Result<Vec<_>, _> = files.into_iter().map(|file| file.into_path().map_err(|e|e.to_string())).collect();
+            engine.request("plan.attach", json!({"paths":paths?}))
+        }
+    }).await.map_err(|e|e.to_string())?
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| { app.manage(Backend(Engine::spawn(app.handle()).map(Arc::new))); Ok(()) })
-        .invoke_handler(tauri::generate_handler![engine_request, open_project])
+        .invoke_handler(tauri::generate_handler![engine_request, open_project, pick_plan_files])
         .build(tauri::generate_context!()).expect("Cannot create desktop application");
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {

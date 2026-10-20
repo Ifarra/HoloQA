@@ -49,11 +49,12 @@ def _kill_on_close(job):
 
 class CodexSession:
     def __init__(self, cwd: Path, emit: Callable, tool: Callable | None = None,
-                 command: list[str] | None = None):
+                 command: list[str] | None = None, *, allow_commands: bool = True):
         binary = shutil.which("codex")
         if command is None and not binary:
             raise ProtocolError("Codex CLI is not installed. Install it and sign in with `codex login`.")
         self.emit, self.tool = emit, tool
+        self.allow_commands = allow_commands
         self.cwd = cwd
         self.pending: dict[int, Future] = {}
         self.approvals: dict[str, Any] = {}
@@ -125,15 +126,46 @@ class CodexSession:
         # Never forward account identifiers, tokens, or provider stderr to UI.
         return "ready" if result.get("account") or not result.get("requiresOpenaiAuth", True) else "signed_out"
 
-    def start(self, prompt, specs):
-        response = self.request("thread/start", {
+    def _draft_config(self):
+        # Passive configuration inspection avoids connecting to unrelated MCP
+        # servers merely to discover their names. Keep keys only: values may
+        # contain provider configuration and must never be logged or forwarded.
+        try:
+            result = self.request("config/read", {"cwd": str(self.process_cwd), "includeLayers": False})
+        except Exception:
+            raise ProtocolError("Cannot isolate plan drafting: Codex configuration could not be checked") from None
+        config = result.get("config")
+        if not isinstance(config, dict) or not isinstance(config.get("mcp_servers", {}), dict):
+            raise ProtocolError("Cannot isolate drafting tools: invalid Codex configuration")
+        names = list(config.get("mcp_servers", {}))
+        del result, config
+        if len(names) > 1000 or any(not isinstance(name, str) or not name or len(name) > 512 for name in names):
+            raise ProtocolError("Cannot isolate drafting tools: invalid MCP server configuration")
+        servers = {name: {"enabled": False} for name in names}
+        return {"features": {name: False for name in (
+            "shell_tool", "unified_exec", "apps", "plugins", "remote_plugin",
+            "browser_use", "browser_use_external", "in_app_browser", "computer_use",
+            "code_mode", "code_mode_host", "multi_agent", "multi_agent_v2",
+            "skill_search", "skill_mcp_dependency_install", "view_image",
+            "hooks", "shell_snapshot", "image_generation")},
+            "web_search": "disabled", "project_doc_max_bytes": 0,
+            "orchestrator": {"mcp": {"enabled": False}},
+            "cloud": {"skills": {"enabled": False}}, "mcp_servers": servers}
+
+    def start(self, prompt, specs, *, developer_instructions=None):
+        params = {
             "cwd": str(self.process_cwd), "approvalPolicy": "untrusted",
             "approvalsReviewer": "user", "sandbox": "read-only", "ephemeral": True,
             "dynamicTools": specs,
-            "developerInstructions": "Run QA only. Do not edit source, plans, configuration, or fixtures. "
+            "developerInstructions": developer_instructions or "Run QA only. Do not edit source, plans, configuration, or fixtures. "
                 "Use the provided holoqa tools to operate the browser and gather evidence. "
                 "Do not launch another HoloQA MCP process. HoloQA alone computes results.",
-        })
+        }
+        if not self.allow_commands:
+            params["config"] = self._draft_config()
+            params["environments"] = []
+            params["selectedCapabilityRoots"] = []
+        response = self.request("thread/start", params)
         self.thread_id = response["thread"]["id"]
         self._start_turn(prompt)
 
@@ -265,7 +297,7 @@ class CodexSession:
                 key = uuid.uuid4().hex
                 command = params.get("command")
                 with self.lock:
-                    refuse = (self.closed or self.pausing or self.finished.is_set() or
+                    refuse = (not self.allow_commands or self.closed or self.pausing or self.finished.is_set() or
                               self._starting_turn or not self._current_turn(params) or
                               not isinstance(command, str) or not command.strip() or len(command) > 6000)
                     if not refuse:

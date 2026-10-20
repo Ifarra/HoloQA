@@ -10,6 +10,8 @@ browser lifecycle and Windows process-tree fixes.
 - Native folder selection and recent projects; bounded, read-only plan discovery.
 - Existing plan loading, validation, warnings, full check review, and exact-byte
   review tokens. A changed plan or resolved target requires a fresh review.
+- Prompt-based Codex plan drafts, reference document attachments, and external YAML import.
+- Editable draft previews, schema validation, explicit new-file save, and mandatory plan review.
 - Explicit starter-plan creation that refuses to overwrite an existing file.
 - Codex app-server initialization and existing account-state checks. No credential
   file reads, token copies, global configuration edits, or interactive login.
@@ -89,6 +91,46 @@ and reason before allowing them. Source-edit requests are always denied during
 QA. Unknown provider requests receive an error without permissions being granted.
 Prompts and project context sent to Codex follow your configured provider's data
 handling; a local engine does not mean local model inference.
+
+## Create a plan from a prompt or documents (0.2.0 development)
+
+Open a project and select **Create plan**. Enter an application name, its running
+HTTP(S) URL, and what to test. **Attach documents** accepts UTF-8 TXT/Markdown,
+text-based PDFs (up to 100 pages), DOCX body text, and XLSX/XLSM workbook values.
+Images, DOCX comments, headers/footers, spreadsheet formulas/macros/images, and
+other embedded objects are not interpreted. Scanned PDFs are passed through as
+unreadable documents; no OCR is required by HoloQA.
+Limits: eight attachments, 5 MiB per file, 15 MiB combined source bytes, and
+100,000 extracted characters combined. Extraction runs in a separate process
+with runtime/output limits and can be cancelled. A rejected batch attaches no
+partial results. Original files stay in place; extracted text and attachment
+metadata live in memory until the project changes or the desktop closes.
+
+**Generate plan with Codex** explicitly sends the request and the selected
+extracted document text to the existing configured Codex provider. Do not attach
+secrets you do not intend to send. Drafting has a separate ephemeral provider
+thread, a five-minute deadline, and no HoloQA browser/evidence tools. Shell, browser, search, plugin, hook, and inherited MCP tools are disabled for
+drafting; shell/file-change approvals are declined. HoloQA passively reads Codex
+configuration to identify MCP server names, discards configuration values, and
+stores no credentials. Drafting cannot start a QA run. Project switching and
+QA starts remain blocked until authoring finishes or is cancelled.
+
+Review the generated plan in the visual overview, with each journey, route, and
+assertion shown as a separate card. **View raw YAML** remains available for
+advanced edits; choose a filename such as `checkout.plan.yaml`.
+**Save and review** validates the edited bytes and creates a new file in the
+project root; an existing file is never overwritten. No review token is issued.
+Read the checks on **Test plan**, approve their expected results, then start the
+supervised run separately. Generating a replacement draft replaces the previous
+proposal, so save a draft you want to keep first. **Import plan file** provides
+the same editable preview/save/review flow for existing YAML, without a model
+call. Plans already discovered inside the project can still be loaded directly.
+
+During analysis, Codex can pause with a focused question when a requirement or
+repository decision is ambiguous. Choose one of the offered answers in the
+HITL panel and the same draft thread continues; cancelling the draft also
+cancels a pending question. This keeps uncertain assumptions out of the saved
+plan and gives the user the final decision before review.
 
 ## Build a Windows installer
 
@@ -189,8 +231,7 @@ Codex CLI, exercise both approval choices, run a local fixture, inspect its
 capture, pause/resume, cancel mid-run, and close the window with a provider child alive.
 CI packaging and a fake peer do not substitute for that interactive test.
 
-This foundation intentionally does not claim agent-assisted plan authoring,
-Claude/OpenCode adapters, automatic app commands, live browser embedding,
+This foundation does not yet include Claude/OpenCode adapters, automatic app commands, live browser embedding,
 secret entry UI, login recovery, or cross-session active-run reattachment.
 Starter plans need real assertions edited by the project owner. Run comparisons
 are currently the saved counts shown together; richer per-check diffs follow
@@ -202,8 +243,8 @@ times out; immediate preflight cancellation remains follow-up work.
 
 ## Versions and GitHub Releases
 
-Desktop and engine versions are independent. The Windows desktop preview is
-`0.1.1`; its bundled Python engine is `2.0.0`. Desktop tags use
+Desktop and engine versions are independent. The development desktop version is
+`0.2.0` (unreleased); the published download remains `0.1.1`. The bundled Python engine is `2.0.0`. Desktop tags use
 `desktop-vX.Y.Z` so they do not collide with engine releases.
 [Desktop changelog](CHANGELOG.md) records each version. Before 1.0, patch
 versions carry fixes and minor versions introduce capabilities or compatibility
