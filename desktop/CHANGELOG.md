@@ -4,6 +4,11 @@ Desktop releases use `desktop-vX.Y.Z` tags. The Python engine has an independent
 version line. Before 1.0, patch versions carry fixes; minor versions introduce
 capabilities or compatibility changes, with breaking changes called out here.
 
+## 0.3.1 — Preview — 2026-10-20
+
+- Apply the new 3D purple HoloQA wordmark, standalone monogram, and app icon across the desktop UI, Windows installer, browser icon, repository, and website.
+- Refresh the published desktop screenshots from the branded UI and keep the approved interface palette unchanged.
+
 ## 0.3.0 — Preview — 2026-10-20
 
 - Create and save a QA plan from a natural-language request using Codex or Claude Code.

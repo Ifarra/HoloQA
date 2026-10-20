@@ -254,7 +254,7 @@ times out; immediate preflight cancellation remains follow-up work.
 ## Versions and GitHub Releases
 
 Desktop and engine versions are independent. The current desktop preview is
-`0.3.0`; the bundled Python engine is `2.1.0`. Desktop tags use `desktop-vX.Y.Z` so they do not collide with engine releases.
+`0.3.1`; the bundled Python engine is `2.1.0`. Desktop tags use `desktop-vX.Y.Z` so they do not collide with engine releases.
 [Desktop changelog](CHANGELOG.md) records each version. Before 1.0, patch
 versions carry fixes and minor versions introduce capabilities or compatibility
 changes; document breaking changes explicitly.

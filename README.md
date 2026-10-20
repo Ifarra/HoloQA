@@ -1,4 +1,4 @@
-<p align="center"><img src="site/assets/holoqa-wordmark.png" alt="HoloQA" width="320"></p>
+<p align="center"><img src="brand/HoloQA_Wordmark_Dark_Surface.png" alt="HoloQA" width="420"></p>
 
 <p align="center">
   <a href="https://github.com/Ifarra/HoloQA"><img src="https://img.shields.io/github/stars/Ifarra/HoloQA?style=for-the-badge&logo=github&label=stars" alt="GitHub stars"></a>

@@ -1,7 +1,7 @@
 # HoloQA — Silver Gothic Editorial
 
-The supplied concept boards and SVG starters establish the H/Q monogram and
-dark application surfaces. The desktop and site use the approved palette below.
+The current 3D purple wordmark, transparent H/Q monogram, and glowing app tile
+are supplied in `new-logo/`. The desktop and site use the approved palette below.
 
 ## Palette
 
@@ -20,8 +20,13 @@ dark application surfaces. The desktop and site use the approved palette below.
 - The app keeps its readable Inter / Segoe UI interface typography.
 - The website uses an editorial serif stack for its large headlines and silver
   typography, with indigo and violet accents for interactive states.
-- The H/Q logo keeps its supplied geometry; vector gradients and wordmark
-  colors use the approved palette.
+- Use `HoloQA_Horizontal_Wordmark.png` for horizontal branding,
+  `HoloQA_Symbol_Transparent.png` for the standalone mark, and
+  `HoloQA_Icon_Dark.png` for app and browser icons. These are raster masters
+  derived from the supplied transparent PNGs; SVG entry points embed the same
+  masters for compatibility.
+- Use `HoloQA_Wordmark_Dark_Surface.png` for README surfaces that may render
+  with a light background, so the silver lettering remains legible.
 - Desktop chrome, the GitHub Pages site, README, favicon, and Windows icon use
   the updated mark.
 
