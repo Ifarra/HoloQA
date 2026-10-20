@@ -25,6 +25,7 @@ from pydantic import create_model, ConfigDict
 
 from holoqa import browser, plan as plans, report, workspace
 from holoqa.desktop_codex import CodexSession
+from holoqa.desktop_claude import ClaudeSession
 from holoqa.desktop_authoring import PlanAuthor, validate_yaml
 from holoqa.desktop_secrets import ProjectEnvironment
 from holoqa.run import Run
@@ -49,7 +50,8 @@ class Engine:
         self.reviews: dict[str, tuple] = {}
         self.run: Run | None = None
         self.run_states: dict[str, str] = {}
-        self.provider: CodexSession | None = None
+        self.provider: Any = None
+        self.scan_provider = "codex"
         self.lifecycle = "idle"
         self.lock = threading.RLock()
         self.tool_lock = threading.RLock()
@@ -297,12 +299,15 @@ class Engine:
             yaml.safe_dump(data, handle, sort_keys=False, allow_unicode=True)
         return self.load_plan("holoqa.plan.yaml")[1]
 
-    def check_provider(self):
+    def check_provider(self, name="codex"):
         self._idle()
-        self.provider_status = {"installed": bool(shutil.which("codex")), "authentication": "unchecked"}
+        if name not in {"codex", "claude"}:
+            raise DesktopError("Choose Codex or Claude Code for desktop scans")
+        self.provider_status = {"name": name, "installed": bool(shutil.which(name)), "authentication": "unchecked"}
         if not self.provider_status["installed"]:
             return self.provider_status
-        session = CodexSession(self.root or Path.home(), self.emit)
+        session = (CodexSession(self.root or Path.home(), self.emit) if name == "codex"
+                   else ClaudeSession(self.root or Path.home(), self.emit, None))
         try:
             self.provider_status["authentication"] = session.initialize()
         finally:
@@ -338,8 +343,10 @@ class Engine:
             self.emit("run.updated", {})
             return result
 
-    def start(self, token):
+    def start(self, token, provider_name="codex"):
         self._idle()
+        if provider_name not in {"codex", "claude"}:
+            raise DesktopError("Choose Codex or Claude Code for this scan")
         reviewed = self.reviews.get(token)
         if not reviewed:
             raise DesktopError("Review the complete plan before starting")
@@ -356,15 +363,21 @@ class Engine:
             raise DesktopError("Install agent-browser and its browser runtime before running QA")
         from holoqa import observe
         observe.set_browser_options(plan.meta.browser.ignore_https_errors, plan.meta.browser.args)
-        specs = self._specs()
-        provider = CodexSession(self.root, self.emit, self.tool)
+        specs = self._specs() if provider_name == "codex" else None
+        provider = (CodexSession(self.root, self.emit, self.tool) if provider_name == "codex"
+                    else ClaudeSession(self.root, self.emit, None))
         allocated = False
         try:
             if provider.initialize() != "ready":
-                raise DesktopError("Sign into Codex CLI with `codex login`, then check the connection")
-            self.run = selected_workspace.start_run(plan, meta={"base_url": target, "desktop": True})
+                command = "codex login" if provider_name == "codex" else "claude"
+                raise DesktopError(f"Sign into {provider_name.title()} CLI with `{command}`, then check the connection")
+            self.run = selected_workspace.start_run(plan, meta={"base_url": target, "desktop": True,
+                                                                "provider": provider_name})
             allocated = True
+            if provider_name == "claude":
+                provider.run = self.run
             self.provider = provider
+            self.scan_provider = provider_name
             self.lifecycle = "starting"
             # Pin the exact plan object loaded and checked above, not a later read.
             from holoqa.agent import workflow_prompt
@@ -531,7 +544,9 @@ class Engine:
             data = run.read()
             return {"status": status, "path": str(run.dir.relative_to(self.root)),
                     "steps": list(data["steps"].values()),
-                    "session": {"path": str(self.run.dir.relative_to(self.root)), "lifecycle": self.lifecycle}
+                    "provider": data.get("meta", {}).get("provider", ""),
+                    "session": {"path": str(self.run.dir.relative_to(self.root)), "lifecycle": self.lifecycle,
+                                "provider": self.scan_provider}
                         if self.provider and self.run else None,
                     "lifecycle": self.run_state(run)}
 
@@ -632,9 +647,9 @@ class Engine:
                 self.reviews.clear()
                 return self.load_plan(filename)[1]
             if method == "provider.check":
-                return self.check_provider()
+                return self.check_provider(params.get("provider", "codex"))
             if method == "run.start":
-                return self.start(params["token"])
+                return self.start(params["token"], params.get("provider", "codex"))
             if method == "run.pause":
                 return self.pause()
             if method == "run.resume":

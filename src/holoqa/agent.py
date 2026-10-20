@@ -68,6 +68,7 @@ class AgentRunRequest:
     mode: str = "supervised"
     model: str = ""
     retain_events: bool = False
+    desktop_run: bool = False
     output_callback: Callable[[str, str], None] | None = field(
         default=None, repr=False, compare=False
     )
@@ -219,7 +220,20 @@ def build_launch(
         args = ["-p", "--mcp-config", str(config_path), "--output-format", "stream-json", "--verbose"]
         if request.model:
             args.extend(["--model", request.model])
-        if request.mode == "unattended":
+        if request.desktop_run:
+            # No edit tools or unrestricted shell in the native desktop. Claude
+            # may call only HoloQA's evidence tools and the browser driver.
+            args.extend([
+                "--permission-mode", "dontAsk", "--permission-prompts", "none",
+                "--allowedTools",
+                "mcp__holoqa__holoqa_browser",
+                "mcp__holoqa__holoqa_observe",
+                "mcp__holoqa__holoqa_judge",
+                "mcp__holoqa__holoqa_block",
+                "mcp__holoqa__holoqa_note",
+                "mcp__holoqa__holoqa_run_status",
+            ])
+        elif request.mode == "unattended":
             # `--permission-prompts none` means *nobody answers*, so anything
             # that would prompt is denied automatically — it is the opposite of
             # Codex's `--approve-for-me`. A run configured for unattended work
@@ -483,7 +497,7 @@ def launch(
     """Launch an agent against an existing run, then report HoloQA's state."""
     request = AgentRunRequest(
         provider=request.provider, cwd=request.cwd.resolve(), mode=request.mode,
-        model=request.model, retain_events=request.retain_events,
+        model=request.model, retain_events=request.retain_events, desktop_run=request.desktop_run,
         output_callback=request.output_callback,
         cancel_event=request.cancel_event,
     )

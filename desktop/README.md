@@ -65,19 +65,21 @@ requirement, so iterating against the interpreter does not require rebuilding
 the PyInstaller executable. The development CSP permits Vite's loopback HMR;
 the release CSP permits only packaged scripts and the native IPC transport.
 
-For QA, install and sign into your own Codex CLI in the same Windows user account.
-The adapter baseline is **codex-cli 0.159.2**. This uses its experimental dynamic
-tool protocol; incompatible versions fail the handshake/start request and do not
-fall back to unattended execution. The adapter's protocol shapes were checked
-against this CLI's generated schemas, not guessed from `codex exec` output.
+For QA, install and sign into either Codex CLI or Claude Code in the same
+Windows user account. Codex uses the app-server adapter (baseline
+**codex-cli 0.159.2**) with per-command approvals. Claude uses its stream-json
+CLI with a strict allowlist of HoloQA evidence tools; it cannot run arbitrary
+commands or edit project files. Both support pause, resume, stop, and the same
+HoloQA evidence ledger. Claude resumes with the same CLI session after a pause.
 
 ```powershell
 codex login
+# Or install Claude Code and sign in with `claude`.
 npm install -g agent-browser
 agent-browser install
 ```
 
-Use Agent & target → Check connection to check the provider. Start your local or
+Use Agent & target → choose a scan agent and check its connection. Start your local or
 staging application yourself. Open a project, choose its plan, read all checks,
 and approve it. The preflight identifies the target and warns that a plan may
 submit forms or modify test data. Starting a run also verifies current provider
@@ -85,9 +87,10 @@ authentication and browser-driver presence. There is no automatic app startup
 or silent installation.
 
 Codex runs with read-only sandboxing and user-routed command approvals. HoloQA's
-hosted dynamic tools perform the intended browser actions and evidence writes.
-Native commands may be requested by Codex; review their full command, directory,
-and reason before allowing them. Source-edit requests are always denied during
+hosted tools perform the intended browser actions and evidence writes. Native
+commands may be requested by Codex; review their full command, directory, and
+reason before allowing them. Claude can call only HoloQA's named evidence tools;
+it has no shell or source-edit permission. Source-edit requests are denied during
 QA. Unknown provider requests receive an error without permissions being granted.
 Prompts and project context sent to Codex follow your configured provider's data
 handling; a local engine does not mean local model inference.
@@ -227,12 +230,12 @@ run shell actions or contact a model. The test does not exercise native WebView2
 
 A real Windows acceptance pass is still necessary: install the NSIS artifact,
 open a folder containing spaces and non-ASCII characters, sign into a supported
-Codex CLI, exercise both approval choices, run a local fixture, inspect its
-capture, pause/resume, cancel mid-run, and close the window with a provider child alive.
+Codex or Claude CLI, exercise Codex approval choices, run a local fixture, inspect
+its capture, pause/resume both providers, cancel mid-run, and close the window with a provider child alive.
 CI packaging and a fake peer do not substitute for that interactive test.
 
-This foundation does not yet include Claude/OpenCode adapters, automatic app commands, live browser embedding,
-secret entry UI, login recovery, or cross-session active-run reattachment.
+This foundation does not yet include OpenCode scan support, automatic app commands,
+live browser embedding, login recovery, or cross-session active-run reattachment.
 Starter plans need real assertions edited by the project owner. Run comparisons
 are currently the saved counts shown together; richer per-check diffs follow
 after the first Windows proof. Packaging and provider behavior need validation
