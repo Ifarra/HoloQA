@@ -204,3 +204,37 @@ async def test_demo_mode_does_not_read_a_run(tmp_path):
         app._sync_from_run()
         await pilot.pause()
         assert app.state.steps == before
+
+
+def test_terminal_integrity_cache_is_reverified_periodically(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text("{}", encoding="utf-8")
+
+    class FakeRun:
+        dir = run_dir
+        evidence_dir = run_dir / "evidence"
+        attestation_path = run_dir / "attestation.json"
+        checks = 0
+
+        def read(self):
+            return {"steps": {"A1": {"verdict": "PASS", "observations": [], "assertions": []}}}
+
+        def pinned_plan(self):
+            return object()
+
+        def status(self, _plan):
+            self.checks += 1
+            return {"decision": "RELEASE"}
+
+    fake_run = FakeRun()
+    monkeypatch.setattr("holoqa.tui.run_module.find", lambda _path: fake_run)
+    app = HoloQATui(state=TuiState(steps=[("A1", "A1 title", "PASS")]), run_dir=str(run_dir))
+    monkeypatch.setattr(app, "_render_state", lambda: None)
+    app._sync_from_run()
+    app._sync_from_run()
+    assert fake_run.checks == 1
+
+    app._verified_terminal_at -= 16
+    app._sync_from_run()
+    assert fake_run.checks == 2

@@ -114,6 +114,49 @@ def test_tab_limit_refuses_new_tab_and_closes_popup_overflow(run, monkeypatch):
     assert json.loads((run.out_dir/'browser-sessions.json').read_text())['active']==[]
 
 
+def test_tab_limit_checks_popups_from_form_handlers(run, monkeypatch):
+    env,_=driver_env(run,monkeypatch); env['HOLOQA_MAX_BROWSER_TABS']='1'
+    count=1
+    def raw(args, env, **kwargs):
+        nonlocal count
+        if args[0]=='tab':
+            return json.dumps({'data': {'tabs': [{}]*count}}).encode()
+        count=2  # A change handler opens a popup while filling the field.
+        return b'ok'
+    monkeypatch.setattr(browser_driver,'raw',raw)
+    with pytest.raises(ValueError,match='session closed'):
+        browser_driver.execute(['fill','#email','value'],env)
+
+
+def test_tab_limit_closes_popup_even_when_action_reports_failure(run, monkeypatch):
+    env,_=driver_env(run,monkeypatch); env['HOLOQA_MAX_BROWSER_TABS']='1'
+    count=1; calls=[]
+    def raw(args, env, **kwargs):
+        nonlocal count
+        calls.append(args)
+        if args[0]=='tab':
+            return json.dumps({'data': {'tabs': [{}]*count}}).encode()
+        if args[0]=='click':
+            count=2  # The page opened a popup before the click command failed.
+            raise ValueError('click failed')
+        return b'ok'
+    monkeypatch.setattr(browser_driver,'raw',raw)
+    with pytest.raises(ValueError,match='session closed'):
+        browser_driver.execute(['click','#popup'],env)
+    assert ['close'] in calls
+
+
+def test_driver_recovers_stale_cleanup_marker_without_pid_checks(run, monkeypatch):
+    env,_=driver_env(run,monkeypatch)
+    registry=run.out_dir/'browser-sessions.json'
+    registry.write_text(json.dumps({'active': [], 'closing': True}))
+    monkeypatch.setattr(browser_driver,'raw',lambda *args,**kwargs:b'ok')
+    assert browser_driver.execute(['get','url'],env)==b'ok'
+    state=json.loads(registry.read_text())
+    assert state['active']==[env['AGENT_BROWSER_SESSION']]
+    assert 'closing' not in state
+
+
 def test_driver_rejects_unowned_sessions_and_overrides(run, monkeypatch):
     env,_=driver_env(run,monkeypatch)
     with pytest.raises(ValueError,match='owned session'):

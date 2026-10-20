@@ -97,8 +97,15 @@ Run directory: {run_dir}
 
 - The plan is read-only. Do not edit it.
 - Do not modify application source, configuration, or test fixtures.
-- Drive the target application only as needed to exercise the plan.
-- Use HoloQA tools to capture evidence and judge each step.
+- Read the whole plan first and follow its staged user journeys in order.
+- Use the actor assigned to each plan step, and establish that actor's required authentication state before its checks. Reuse that actor's page, authentication, and test data only across related checks assigned to the same actor; never carry one role's session into another role's step.
+- Avoid repeating a login, navigation, or setup action when the current browser state for that actor already satisfies it.
+- For each step, collect the evidence its assertions need, then judge that step once. A single DOM capture can prove several URL/text assertions; a single API capture can prove status, JSON, and header assertions. Do not capture screenshots unless the plan requires them or visual evidence is useful.
+- Prefer the least expensive evidence that proves the requirement: use API captures for API behavior and DOM captures for page content. Use screenshots for visual state, not as a substitute for machine-checkable assertions.
+- Do not open extra tabs or windows unless the plan requires them. Keep all actions in the assigned actor session and close a session only when that actor's journey is finished.
+- Check the current page and run status before repeating work. After an uncertain action, inspect the result before retrying; for submits, deletes, or other non-idempotent actions, avoid creating duplicate side effects.
+- Follow declared dependencies and captured variables exactly. Do not skip a step because a related check passed; every planned step needs its own HoloQA verdict.
+- Use HoloQA tools to capture evidence and judge each step. Read status at the start and after meaningful milestones, rather than polling it after every browser action.
 - A PASS or FAIL is authoritative only when returned by HoloQA.
 - Use BLOCKED only for a genuine prerequisite or safety stop, with a concrete cause.
 - Do not call holoqa_run_package unless the user explicitly asked for it.

@@ -34,6 +34,8 @@ from holoqa import agent as agent_module
 from holoqa import plan as plan_module
 from holoqa import run as run_module
 
+TERMINAL_INTEGRITY_REFRESH_SECONDS = 15
+
 
 def row_is_legacy(run_path: Path, workspace) -> bool:
     """Is this run in the old flat layout rather than inside a workspace?
@@ -348,6 +350,10 @@ class HoloQATui(App[None]):
             time.monotonic() - 12.4 if demo and not animated else (time.monotonic() if animated else None)
         )
         self._last_error = ""
+        self._last_synced_run_signature: tuple[Any, ...] | None = None
+        self._verified_terminal_signature: tuple[Any, ...] | None = None
+        self._verified_terminal_decision: str | None = None
+        self._verified_terminal_at: float | None = None
         self.selected_step_id: str | None = None
         self.selected_artifact_index = 0
         self.selected_assertion_index = 0
@@ -1131,15 +1137,28 @@ class HoloQATui(App[None]):
     def _sync_from_run(self) -> None:
         """Re-read run.json and reflect it in the step list and verdict card.
 
-        Cheap by design — a small JSON file, once a second — and it makes the
-        dashboard correct for any provider, including one whose event stream the
-        transcript does not understand. The verdicts it shows are HoloQA's own,
-        never a guess made from provider output.
+        Run and evidence metadata are checked each tick; the JSON is rebuilt
+        only when a record or artifact changes. This keeps the dashboard current
+        for any provider without repeatedly walking a growing evidence ledger.
+        The verdicts it shows are HoloQA's own, never a guess from provider text.
         """
         if not self.run_dir or self.demo_mode:
             return
         try:
             run = run_module.find(self.run_dir)
+            signature = self._run_view_signature(run)
+            current_steps = len(self.state.steps)
+            current_done = sum(verdict in {"PASS", "FAIL", "BLOCKED"}
+                               for _step_id, _title, verdict in self.state.steps)
+            terminal_cache_due = (
+                current_steps > 0
+                and current_done == current_steps
+                and (self._verified_terminal_at is None
+                     or time.monotonic() - self._verified_terminal_at >= TERMINAL_INTEGRITY_REFRESH_SECONDS)
+            )
+            if (signature is not None and signature == self._last_synced_run_signature
+                    and not terminal_cache_due):
+                return
             data = run.read()
         except (OSError, ValueError, run_module.GuardrailError):
             return
@@ -1165,7 +1184,28 @@ class HoloQATui(App[None]):
         total = len(self.state.steps)
         done = sum(counts.values())
         # An incomplete run is not releasable, whatever the counts say.
-        decision = run.status(run.pinned_plan())["decision"]
+        if done < total:
+            # An incomplete checklist is always HOLD. Calling run.status here
+            # would also hash every evidence artifact through integrity(), once
+            # per UI tick, even though those bytes cannot change this result.
+            decision = "HOLD"
+            self._verified_terminal_signature = None
+            self._verified_terminal_decision = None
+            self._verified_terminal_at = None
+        else:
+            cache_valid = (
+                signature is not None
+                and signature == self._verified_terminal_signature
+                and self._verified_terminal_at is not None
+                and time.monotonic() - self._verified_terminal_at < TERMINAL_INTEGRITY_REFRESH_SECONDS
+            )
+            if cache_valid:
+                decision = self._verified_terminal_decision or "HOLD"
+            else:
+                decision = run.status(run.pinned_plan())["decision"]
+                self._verified_terminal_signature = signature
+                self._verified_terminal_decision = decision
+                self._verified_terminal_at = time.monotonic()
         if self.state.decision != decision:
             self.state.decision = decision
             changed = True
@@ -1197,18 +1237,35 @@ class HoloQATui(App[None]):
                     )
                     for item in step["assertions"] if isinstance(item, dict)
                 ]
-        if len(evidence) != len(self.state.evidence):
+        if evidence != self.state.evidence:
             self.state.evidence = evidence
             changed = True
-        if len(artifacts) != len(self.state.artifacts):
+        if artifacts != self.state.artifacts:
             self.state.artifacts = artifacts
             changed = True
         if assertions:
             self.state.assertions = assertions
             changed = True
 
+        self._last_synced_run_signature = self._run_view_signature(run)
+        if done == total and self._verified_terminal_decision is not None:
+            self._verified_terminal_signature = self._last_synced_run_signature
         if changed and self.is_mounted:
             self._render_state()
+
+    def _run_view_signature(self, run) -> tuple[Any, ...] | None:
+        """Notice run/attestation changes cheaply; integrity is rechecked periodically."""
+        try:
+            stat = (run.dir / "run.json").stat()
+        except OSError:
+            return None
+        parts: list[Any] = [stat.st_mtime_ns, stat.st_size]
+        try:
+            attestation_stat = run.attestation_path.stat()
+            parts.extend((attestation_stat.st_mtime_ns, attestation_stat.st_size))
+        except OSError:
+            parts.extend((None, None))
+        return tuple(parts)
 
     def _handle_agent_line(self, channel: str, line: str) -> None:
         summary = self._human_event(channel, line)
@@ -1631,6 +1688,10 @@ class HoloQATui(App[None]):
         except (OSError, KeyError, ValueError, plan_module.PlanError, run_module.GuardrailError) as error:
             self._set_safety(f"Refresh failed: {error}")
             return
+        self._last_synced_run_signature = self._run_view_signature(run)
+        self._verified_terminal_signature = self._last_synced_run_signature
+        self._verified_terminal_decision = status["decision"]
+        self._verified_terminal_at = time.monotonic()
         self._render_state()
         self._set_safety("Refreshed from HoloQA run state")
 

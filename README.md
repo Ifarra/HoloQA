@@ -115,7 +115,7 @@ holoqa selftest     # 30 guardrail checks, offline, no browser, no network
 `doctor` prints the exact JSON to paste, and tells you what is missing:
 
 ```
-holoqa           2.0.0
+holoqa           2.1.0
 agent-browser    agent-browser 0.27.0
 
 MCP client entry:
@@ -1065,7 +1065,7 @@ managed MCP tool for limits and automatic cleanup.
 | Resource | Default limit | Behavior at the limit |
 |---|---|---|
 | Active browser sessions per run | 4 | Refuse another actor until an idle session is closed |
-| Tabs per session | 8 | Refuse explicit new tabs; close and report a session if page popups exceed the limit |
+| Tabs per session | 8 | Refuse explicit new tabs; close and report a session if detected page popups exceed the limit |
 | API response body | 1 MiB | Abort capture with an explicit error |
 | Intercepted export | 4 MiB | Refuse oversized exports; consume successful buffers once |
 | SSE capture | 60 seconds, 50 retained events | Count all received events, retain a bounded sample, redact captured data |
@@ -1075,8 +1075,10 @@ managed MCP tool for limits and automatic cleanup.
 | In-process recording ledgers | 16 runs | Retired runs lose in-memory authority and require verification/attestation |
 
 Set `HOLOQA_MAX_BROWSER_SESSIONS` and `HOLOQA_MAX_BROWSER_TABS` to positive
-integers before launching HoloQA to change browser limits. Limits apply per
-run/session, not to total machine RAM. Managed navigation requires a driver
+integers before launching HoloQA to change browser limits. These safeguards
+bound an individual run/session; multiple concurrent runs can multiply total
+browser processes and memory use, so they are not a machine-wide RAM cap.
+Managed navigation requires a driver
 with `tab list --json` support; an unsupported response produces an explicit
 error rather than silently disabling accounting.
 

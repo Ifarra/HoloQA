@@ -13,13 +13,14 @@ capabilities or compatibility changes, with breaking changes called out here.
 - Import external YAML plans, edit generated/imported YAML, and save a new project plan without overwriting existing files.
 - Validate drafts through the execution schema; require a fresh full-plan review before any scan.
 - Separate draft generation and document intake from QA lifecycles, with cancellation and visible provider-sharing disclosure.
+- Bundle Python engine 2.1.0 with journey-oriented planning, browser lifecycle/resource safeguards, and lower-cost TUI refreshes.
 
 ## 0.1.1 — Preview — 2026-10-19
 
 Desktop and browser/resource lifecycle work integrated into `main`.
 
 - Synchronized desktop versions, checksummed releases, and verified-source publishing.
-- Independent desktop and Python engine version lines; engine remains 2.0.0.
+- Independent desktop and Python engine version lines; engine was 2.0.0 at this desktop release.
 - Separate release/CI concurrency and no duplicate development push/PR builds.
 - Windows cleanup regressions wait for worker completion before asserting cleanup.
 - Release assets are built from the exact tagged main commit.
