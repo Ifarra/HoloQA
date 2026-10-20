@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
+import socket
+import sys
 import sys
 import threading
 import time
@@ -87,6 +89,50 @@ def test_starter_plan_escapes_yaml_and_never_overwrites(engine):
     value = 'http://localhost:3000/"quoted"#x'
     result = engine.create_plan("store", value)
     assert result["target"] == value
+
+
+def test_preflight_reports_plan_target_browser_and_provider(engine, monkeypatch):
+    class Response:
+        status=200
+        def __enter__(self): return self
+        def __exit__(self,*_): pass
+    monkeypatch.setattr(desktop.shutil,"which",lambda name: "/fake/agent-browser" if name=="agent-browser" else None)
+    monkeypatch.setattr("urllib.request.urlopen",lambda *_args,**_kwargs:Response())
+    monkeypatch.setattr(engine,"check_provider",lambda name:{"authentication":"ready"})
+    result=engine.preflight("holoqa.plan.yaml","codex")
+    assert result["ready"]
+    assert all(item["ok"] for item in result["checks"])
+    old_digest=engine.load_plan("holoqa.plan.yaml")[1]["sha256"]
+    (engine.root/"holoqa.plan.yaml").write_text(PLAN.replace("Ready","Changed"),encoding="utf-8")
+    changed=engine.preflight("holoqa.plan.yaml","codex",old_digest)
+    assert not changed["ready"]
+    assert "changed after review" in changed["checks"][0]["detail"]
+    (engine.root/"holoqa.plan.yaml").write_text(PLAN,encoding="utf-8")
+    monkeypatch.setattr("urllib.request.urlopen",lambda *_args,**_kwargs:(_ for _ in ()).throw(OSError("offline")))
+    result=engine.preflight("holoqa.plan.yaml","codex")
+    assert not result["ready"]
+    assert "Not responding" in next(item["detail"] for item in result["checks"] if item["id"]=="target")
+
+
+def test_application_startup_requires_explicit_safe_command(engine):
+    with pytest.raises(DesktopError,match="must begin with"):
+        engine.start_application("echo hello", "http://localhost:3000")
+    with pytest.raises(DesktopError,match="valid HTTP"):
+        engine.start_application("npm run dev", "not a URL")
+
+
+def test_application_can_be_started_waited_for_and_stopped(engine):
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1",0));port=listener.getsockname()[1]
+    try:
+        result=engine.start_application(f'"{sys.executable}" -m http.server {port} --bind 127.0.0.1',f"http://127.0.0.1:{port}/")
+        assert result["pid"]==engine.app_process.pid
+        assert "responding" in result["message"]
+        process=engine.app_process
+        engine.stop_application()
+        assert process.poll() is not None
+    finally:
+        engine.stop_application()
 
 
 def test_tools_remain_in_owning_engine_and_restart_cannot_authorize_release(engine, monkeypatch):

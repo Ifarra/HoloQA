@@ -1,25 +1,48 @@
-A **Windows x64 preview** of the HoloQA desktop workspace. This prerelease is built from `main` and bundles the existing HoloQA engine. The installer is unsigned; it has not completed an interactive Windows acceptance pass with a real Codex QA session.
+A **Windows x64 preview** of HoloQA Desktop 0.3.0. It bundles the HoloQA
+2.1.0 engine and supports supervised QA with Codex CLI or Claude Code using
+their existing sign-in. This prerelease installer is unsigned and has not
+completed interactive Windows acceptance with a real provider and browser.
 
-### Included
+### What’s included
 
-- Native project folder selection and recent projects.
-- Plan discovery, starter plans, exact-byte review, and supervised Codex runs.
-- Evidence-backed check results, captures, run history, and report export.
-- Confirmed pause/resume within the same live desktop session, plus Stop and process cleanup.
+- Open a local project folder and create plans from a prompt or existing
+  requirements. Attach TXT, Markdown, text-based PDF, DOCX, XLSX, or XLSM files;
+  HoloQA extracts bounded text and workbook values without OCR.
+- Answer focused questions during plan creation, review the plan in a visual
+  interface or inspect its YAML, save it, and approve every check before a run.
+- Run supervised Codex or Claude scans, inspect evidence and saved history, and
+  pause, resume, or stop within the same live desktop session.
+- Edit project environment values and optionally start an application with an
+  explicit command.
 
 ### Install and run
 
-1. Download the `HoloQA-Desktop-*-windows-x64-setup.exe` asset below and run it. WebView2 may need internet access during setup.
-2. Install Codex CLI and sign in with `codex login` in the same Windows user account.
-3. Install the QA browser driver with `npm install -g agent-browser`, then `agent-browser install`.
-4. Start your target application, open its project folder in HoloQA, and review its plan before running QA.
+1. Download `HoloQA-Desktop-0.3.0-windows-x64-setup.exe` below. WebView2 may need
+   internet access during setup.
+2. Install either Codex CLI or Claude Code and sign in as the same Windows user
+   who runs HoloQA (`codex login` or `claude`).
+3. Install the QA browser driver and browser runtime with
+   `npm install -g agent-browser` and `agent-browser install`.
+4. Start your target application, open its folder in HoloQA, then create or
+   review a plan and complete the launch readiness checks.
 
-The Python engine is bundled; a separate Python installation is not needed. Codex uses its existing sign-in. A plan may submit forms or modify test data, and project context follows the configured provider's data handling.
+HoloQA bundles the Python engine. Plans, captures, and run history stay in the
+project folder; prompts and attached project context are sent to the selected
+provider under its data handling terms. Claude is restricted to named HoloQA
+evidence tools. Codex uses its supervised app-server adapter and per-command
+approval flow. Neither provider can author HoloQA verdicts.
 
 ### Verification and limits
 
-`SHA256SUMS.txt` checks the installer and `release-manifest.json`. The manifest records the exact source commit, successful build run, engine version, and installer hash. In PowerShell, compare `Get-FileHash .\HoloQA-Desktop-*-windows-x64-setup.exe -Algorithm SHA256` with the checksum file.
+`SHA256SUMS.txt` checks the installer and `release-manifest.json`. The manifest
+records the exact source commit, successful build run, engine version, and
+installer hash. In PowerShell, compare
+`Get-FileHash .\HoloQA-Desktop-0.3.0-windows-x64-setup.exe -Algorithm SHA256`
+with the checksum file.
 
-Automated tests cover engine guardrails, protocol interactions, pause/resume UI flows with a deterministic Codex peer, executable startup, and installer packaging. They do not substitute for interactive Windows acceptance with a real model/browser session. Codex app-server baseline: **0.159.2** (experimental dynamic tools).
-
-Resume requires the owning desktop engine to remain alive; it does not freeze the application's state. The 30-minute session limit includes pauses. Automatic app startup, additional agents, signing, automatic updates, and cross-session recovery are future work.
+Automated engine, protocol, UI, executable startup, and installer checks run in
+CI. They do not substitute for interactive Windows acceptance with a real
+provider and browser session. The installer is unsigned. Paused runs require
+the same desktop session to remain open; closing or restarting the app does not
+restore a live provider session. Automatic updates and code signing are not
+included.

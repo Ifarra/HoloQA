@@ -13,7 +13,11 @@ import inspect
 import json
 import os
 from pathlib import Path
+import re
+import shlex
+import signal
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -24,7 +28,9 @@ from pydantic import create_model, ConfigDict
 
 from holoqa import browser, plan as plans, report, workspace
 from holoqa.desktop_codex import CodexSession
+from holoqa.desktop_claude import ClaudeSession
 from holoqa.desktop_authoring import PlanAuthor, validate_yaml
+from holoqa.desktop_secrets import ProjectEnvironment
 from holoqa.run import Run
 from holoqa.storage import atomic_json
 
@@ -41,12 +47,14 @@ class DesktopError(ValueError):
 class Engine:
     def __init__(self, state_dir: Path, emit=lambda *_: None):
         self.state_dir, self.emit = state_dir, emit
+        self.environment = ProjectEnvironment(state_dir)
         self.author = PlanAuthor(emit, lambda *args, **kwargs: CodexSession(*args, **kwargs))
         self.root: Path | None = None
         self.reviews: dict[str, tuple] = {}
         self.run: Run | None = None
         self.run_states: dict[str, str] = {}
-        self.provider: CodexSession | None = None
+        self.provider: Any = None
+        self.scan_provider = "codex"
         self.lifecycle = "idle"
         self.lock = threading.RLock()
         self.tool_lock = threading.RLock()
@@ -56,6 +64,7 @@ class Engine:
         self.state_changed = threading.Event()
         self.closing = False
         self.provider_status = {"installed": bool(shutil.which("codex")), "authentication": "unchecked"}
+        self.app_process: subprocess.Popen | None = None
 
     @property
     def lifecycle(self):
@@ -167,6 +176,7 @@ class Engine:
         root = Path(path).expanduser().resolve()
         if not root.is_dir():
             raise DesktopError("Select an existing project directory")
+        self.stop_application()
         self.author.reset()
         self.root, self.reviews, self.run = root, {}, None
         recent = [str(root)] + [p for p in self.recent() if p != str(root)]
@@ -207,19 +217,73 @@ class Engine:
         candidate = self.contained(path)
         if not candidate.is_file() or candidate.stat().st_size > LIMIT:
             raise DesktopError("Plan must be a file smaller than 1 MiB")
-        plan = plans.load(candidate)
+        variables = {**os.environ, **self.environment.load(self.root)}
+        plan = plans.load(candidate, environ=variables)
         summary = plans.lint(candidate)
         return plan, {"path": str(candidate.relative_to(self.root)), "sha256": plan.source_sha256,
             "app": plan.meta.app, "target": plan.meta.base_url, "stages": [s.model_dump() for s in plan.stages],
             "steps": [s.model_dump() for s in plan.steps], "warnings": summary["warnings"]}
+
+    def environment_digest(self):
+        values = {**os.environ, **self.environment.load(self.root)}
+        encoded = json.dumps(values, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     def review(self, path, digest):
         _, summary = self.load_plan(path)
         if summary["sha256"] != digest:
             raise DesktopError("The plan changed. Reload and review it again.")
         key = uuid.uuid4().hex
-        self.reviews[key] = (summary["path"], digest, summary["target"])
+        self.reviews[key] = (summary["path"], digest, summary["target"], self.environment_digest())
         return {"token": key}
+
+    def environment_rows(self):
+        self._idle()
+        if not self.root:
+            raise DesktopError("Open a project folder first")
+        configured = set(self.environment.names(self.root))
+        referenced = set()
+        pattern = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+        for parent, dirs, files in os.walk(self.root, followlinks=False):
+            rel = Path(parent).relative_to(self.root)
+            dirs[:] = [d for d in dirs if d not in SKIP and not (Path(parent) / d).is_symlink()]
+            if len(rel.parts) >= 3:
+                dirs[:] = []
+            for name in files:
+                if name == "holoqa.plan.yaml" or name.endswith((".plan.yaml", ".plan.yml")):
+                    candidate = Path(parent) / name
+                    if candidate.is_file() and candidate.stat().st_size <= LIMIT:
+                        try:
+                            referenced.update(pattern.findall(candidate.read_text("utf-8")))
+                        except (OSError, UnicodeError):
+                            continue
+        return [{"name": name, "configured": name in configured, "referenced": name in referenced}
+                for name in sorted(configured | referenced)]
+
+    def set_environment(self, name, value):
+        self._idle()
+        if not self.root:
+            raise DesktopError("Open a project folder first")
+        self.environment.validate(name, value)
+        values = self.environment.load(self.root)
+        values[name] = value
+        self.environment.save(self.root, values)
+        self.reviews.clear()
+        self.emit("environment.updated", {})
+        return self.environment_rows()
+
+    def delete_environment(self, name):
+        self._idle()
+        if not self.root:
+            raise DesktopError("Open a project folder first")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,127}", name):
+            raise DesktopError("Choose a valid environment variable")
+        values = self.environment.load(self.root)
+        values.pop(name, None)
+        self.environment.save(self.root, values)
+        self.reviews.clear()
+        self.emit("environment.updated", {})
+        return self.environment_rows()
 
     def create_plan(self, app, url):
         self._idle()
@@ -240,17 +304,112 @@ class Engine:
             yaml.safe_dump(data, handle, sort_keys=False, allow_unicode=True)
         return self.load_plan("holoqa.plan.yaml")[1]
 
-    def check_provider(self):
+    def check_provider(self, name="codex"):
         self._idle()
-        self.provider_status = {"installed": bool(shutil.which("codex")), "authentication": "unchecked"}
+        if name not in {"codex", "claude"}:
+            raise DesktopError("Choose Codex or Claude Code for desktop scans")
+        self.provider_status = {"name": name, "installed": bool(shutil.which(name)), "authentication": "unchecked"}
         if not self.provider_status["installed"]:
             return self.provider_status
-        session = CodexSession(self.root or Path.home(), self.emit)
+        session = (CodexSession(self.root or Path.home(), self.emit) if name == "codex"
+                   else ClaudeSession(self.root or Path.home(), self.emit, None))
         try:
             self.provider_status["authentication"] = session.initialize()
         finally:
             session.close()
         return self.provider_status
+
+    def preflight(self, path, provider_name="codex", reviewed_sha256=""):
+        """Check all launch prerequisites without changing project or run state."""
+        plan, summary = self.load_plan(path)
+        target = summary["target"]
+        plan_unchanged=not reviewed_sha256 or summary["sha256"]==reviewed_sha256
+        checks = [{"id":"plan", "label":"Plan is valid and reviewed", "ok":plan_unchanged,
+                   "detail": ("Plan parsed and checks are ready" if not summary["warnings"] else f"Valid · {len(summary['warnings'])} review note(s)") if plan_unchanged else "Plan changed after review. Reload and review it again."},
+                  {"id":"target", "label":"Application target", "ok":bool(target and "${" not in target),
+                   "detail":target or "Set the plan base_url and resolve its variables"},
+                  {"id":"browser", "label":"Browser driver", "ok":bool(shutil.which("agent-browser")),
+                   "detail":"agent-browser detected" if shutil.which("agent-browser") else "Install agent-browser and its browser runtime"},
+                  {"id":"provider", "label":provider_name.title()+" connection", "ok":False,
+                   "detail":"Check the coding agent connection"}]
+        if provider_name not in {"codex", "claude"}:
+            raise DesktopError("Choose Codex or Claude Code for this scan")
+        if checks[1]["ok"]:
+            from urllib.parse import urlparse
+            parsed=urlparse(target)
+            checks[1]["ok"]=parsed.scheme in {"http","https"} and bool(parsed.hostname)
+        if checks[1]["ok"]:
+            try:
+                from urllib.request import Request, urlopen
+                with urlopen(Request(target, method="HEAD"), timeout=2) as response:
+                    checks[1]["detail"] = f"Responding · HTTP {response.status}"
+            except Exception as error:
+                checks[1]["ok"] = False
+                checks[1]["detail"] = f"Not responding at {target} ({str(error)[:120]})"
+        try:
+            status=self.check_provider(provider_name)
+            checks[3]["ok"]=status["authentication"]=="ready"
+            checks[3]["detail"]="Installed and signed in" if checks[3]["ok"] else f"{status['authentication']} · sign in with {provider_name}"
+        except Exception as error:
+            checks[3]["detail"]=str(error)[:180]
+        return {"checks":checks,"ready":all(check["ok"] for check in checks),"target":target,
+                "provider":provider_name,"plan":summary["path"]}
+
+    def start_application(self, command, target):
+        if not self.root:
+            raise DesktopError("Open a project folder first")
+        if self.app_process and self.app_process.poll() is None:
+            raise DesktopError("HoloQA already started an application process")
+        if not isinstance(command, str) or len(command) > 1000:
+            raise DesktopError("Enter a startup command shorter than 1000 characters")
+        try:
+            # POSIX parsing strips the quotes around Windows executable paths
+            # while preserving their backslashes, which is what Popen needs.
+            args=shlex.split(command, posix=True)
+        except ValueError as error:
+            raise DesktopError(f"Invalid startup command: {error}") from error
+        if not args or Path(args[0]).name.lower().removesuffix(".cmd").removesuffix(".exe") not in {"npm","pnpm","yarn","bun","uv","python","python3"}:
+            raise DesktopError("For safety, startup commands must begin with npm, pnpm, yarn, bun, uv, or python")
+        from urllib.parse import urlparse
+        parsed=urlparse(target or "")
+        if parsed.scheme not in {"http","https"} or not parsed.hostname:
+            raise DesktopError("Set a valid HTTP or HTTPS application URL first")
+        kwargs={"cwd":str(self.root),"stdin":subprocess.DEVNULL,"stdout":subprocess.DEVNULL,"stderr":subprocess.DEVNULL}
+        if os.name == "nt":kwargs["creationflags"]=getattr(subprocess,"CREATE_NEW_PROCESS_GROUP",0)
+        else:kwargs["start_new_session"]=True
+        try:self.app_process=subprocess.Popen(args, **kwargs)
+        except OSError as error:raise DesktopError(f"Could not start the application: {error}") from error
+        from urllib.request import Request,urlopen
+        deadline=time.monotonic()+15
+        while time.monotonic()<deadline:
+            if self.app_process.poll() is not None:
+                self.app_process=None
+                raise DesktopError("The application process exited before the target became ready")
+            try:
+                with urlopen(Request(target,method="HEAD"),timeout=1) as response:
+                    return {"message":f"Application is responding · HTTP {response.status}","pid":self.app_process.pid}
+            except Exception:time.sleep(.25)
+        self.stop_application()
+        raise DesktopError("Application did not respond within 15 seconds; HoloQA stopped the process")
+
+    def stop_application(self):
+        process,self.app_process=self.app_process,None
+        if process and process.poll() is None:
+            if os.name == "nt":
+                # npm and other package managers leave their dev server in a child process.
+                subprocess.run(["taskkill","/PID",str(process.pid),"/T","/F"],stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+            else:
+                try:os.killpg(process.pid,signal.SIGTERM)
+                except ProcessLookupError:pass
+            try:process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                if os.name=="nt":process.kill()
+                else:
+                    try:os.killpg(process.pid,signal.SIGKILL)
+                    except ProcessLookupError:pass
+                process.wait(timeout=2)
+        return {"message":"Application process stopped"}
 
     def _specs(self):
         from holoqa import mcp
@@ -281,14 +440,17 @@ class Engine:
             self.emit("run.updated", {})
             return result
 
-    def start(self, token):
+    def start(self, token, provider_name="codex"):
         self._idle()
+        if provider_name not in {"codex", "claude"}:
+            raise DesktopError("Choose Codex or Claude Code for this scan")
         reviewed = self.reviews.get(token)
         if not reviewed:
             raise DesktopError("Review the complete plan before starting")
-        path, digest, target = reviewed
+        path, digest, target, environment_digest = reviewed
         plan, summary = self.load_plan(path)
-        if summary["sha256"] != digest or summary["target"] != target:
+        if (summary["sha256"] != digest or summary["target"] != target
+                or self.environment_digest() != environment_digest):
             self.reviews.pop(token, None)
             raise DesktopError("Plan or resolved target changed. Review again.")
         if not target.startswith(("http://", "https://")) or "${" in target:
@@ -298,15 +460,21 @@ class Engine:
             raise DesktopError("Install agent-browser and its browser runtime before running QA")
         from holoqa import observe
         observe.set_browser_options(plan.meta.browser.ignore_https_errors, plan.meta.browser.args)
-        specs = self._specs()
-        provider = CodexSession(self.root, self.emit, self.tool)
+        specs = self._specs() if provider_name == "codex" else None
+        provider = (CodexSession(self.root, self.emit, self.tool) if provider_name == "codex"
+                    else ClaudeSession(self.root, self.emit, None))
         allocated = False
         try:
             if provider.initialize() != "ready":
-                raise DesktopError("Sign into Codex CLI with `codex login`, then check the connection")
-            self.run = selected_workspace.start_run(plan, meta={"base_url": target, "desktop": True})
+                command = "codex login" if provider_name == "codex" else "claude"
+                raise DesktopError(f"Sign into {provider_name.title()} CLI with `{command}`, then check the connection")
+            self.run = selected_workspace.start_run(plan, meta={"base_url": target, "desktop": True,
+                                                                "provider": provider_name})
             allocated = True
+            if provider_name == "claude":
+                provider.run = self.run
             self.provider = provider
+            self.scan_provider = provider_name
             self.lifecycle = "starting"
             # Pin the exact plan object loaded and checked above, not a later read.
             from holoqa.agent import workflow_prompt
@@ -473,7 +641,9 @@ class Engine:
             data = run.read()
             return {"status": status, "path": str(run.dir.relative_to(self.root)),
                     "steps": list(data["steps"].values()),
-                    "session": {"path": str(self.run.dir.relative_to(self.root)), "lifecycle": self.lifecycle}
+                    "provider": data.get("meta", {}).get("provider", ""),
+                    "session": {"path": str(self.run.dir.relative_to(self.root)), "lifecycle": self.lifecycle,
+                                "provider": self.scan_provider}
                         if self.provider and self.run else None,
                     "lifecycle": self.run_state(run)}
 
@@ -504,7 +674,14 @@ class Engine:
         if method == "hello":
             return {"protocol": PROTOCOL, "recent": self.recent(), "project": self.project(),
                     "provider": self.provider_status, "browserInstalled": bool(shutil.which("agent-browser")),
+                    "planProviders": {name: bool(shutil.which(name)) for name in ("codex", "claude", "opencode")},
                     "qaTools": [tool["name"] for tool in self._specs()]}
+        if method == "run.preflight":
+            return self.preflight(params.get("path", ""), params.get("provider", "codex"), params.get("sha256", ""))
+        if method == "application.start":
+            return self.start_application(params.get("command"), params.get("target"))
+        if method == "application.stop":
+            return self.stop_application()
         if method == "plan.draft.cancel":
             return self.author.cancel()
         if method == "plan.draft.answer":
@@ -535,6 +712,12 @@ class Engine:
                 return self.load_plan(params["path"])[1]
             if method == "plan.review":
                 return self.review(params["path"], params["sha256"])
+            if method == "environment.list":
+                return self.environment_rows()
+            if method == "environment.set":
+                return self.set_environment(params.get("name"), params.get("value"))
+            if method == "environment.delete":
+                return self.delete_environment(params.get("name"))
             if method == "plan.create":
                 return self.create_plan(params["app"], params["url"])
             if method == "plan.draft.snapshot":
@@ -550,7 +733,7 @@ class Engine:
                 if method == "plan.attachment.remove":
                     return self.author.remove(params["id"])
                 if method == "plan.draft.start":
-                    return self.author.start(self.root, params["app"], params["url"], params["prompt"], params.get("attachments", []))
+                    return self.author.start(self.root, params["app"], params["url"], params["prompt"], params.get("attachments", []), params.get("provider", "codex"))
                 if self.author.state != "ready":
                     raise DesktopError("Generate or import a valid draft before saving")
                 content, filename = params["yaml"], params["filename"]
@@ -567,9 +750,9 @@ class Engine:
                 self.reviews.clear()
                 return self.load_plan(filename)[1]
             if method == "provider.check":
-                return self.check_provider()
+                return self.check_provider(params.get("provider", "codex"))
             if method == "run.start":
-                return self.start(params["token"])
+                return self.start(params["token"], params.get("provider", "codex"))
             if method == "run.pause":
                 return self.pause()
             if method == "run.resume":
@@ -638,6 +821,7 @@ def main():
             engine.closing = True
             engine.author.cancel()
             engine.stop()
+            engine.stop_application()
 
 
 if __name__ == "__main__":

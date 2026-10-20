@@ -8,6 +8,7 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const root = resolve(desktop, '..');
@@ -29,6 +30,8 @@ const lines=createInterface({input:engine.stdout});
 lines.on('line',line=>{const m=JSON.parse(line);if(m.id){const p=pending.get(m.id);pending.delete(m.id);if(p)m.error?p.reject(new Error(m.error.message)):p.resolve(m.result);}else if(m.event){void forwardEvent(m);}});
 const request=(method,params={})=>new Promise((resolve,reject)=>{const key=++id;pending.set(key,{resolve,reject});engine.stdin.write(JSON.stringify({id:key,method,params})+'\n');});
 const vite=spawn(process.execPath,[join(desktop,'node_modules/vite/bin/vite.js'),'--host','127.0.0.1','--port','1421'],{cwd:desktop,stdio:'ignore'});
+const targetServer=createServer((_request,response)=>{response.writeHead(200);response.end('ready');});
+await new Promise(resolve=>targetServer.listen(3000,'127.0.0.1',resolve));
 let browser;
 try {
   for(let n=0;n<100;n++){try{const r=await fetch('http://127.0.0.1:1421');if(r.ok)break;}catch{}await new Promise(r=>setTimeout(r,100));}
@@ -56,10 +59,16 @@ try {
   await page.goto('http://127.0.0.1:1421');
   await page.getByRole('button',{name:'Open project folder',exact:true}).last().click();
   await page.getByText('Your first run starts the story.',{exact:true}).waitFor();
-  if(process.env.HOLOQA_SCREENSHOTS){await mkdir(process.env.HOLOQA_SCREENSHOTS,{recursive:true});await page.screenshot({path:join(process.env.HOLOQA_SCREENSHOTS,'desktop-overview.png'),fullPage:true});}
   await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Test plan',exact:true}).click();
   await page.getByRole('heading',{name:'Storefront is ready',exact:true}).waitFor();
-  assert.equal(await page.getByRole('button',{name:'Start supervised run'}).isEnabled(),false);
+  await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Overview',exact:true}).click();
+  await page.locator('.busy').waitFor({state:'detached'});
+  const shellGeometry=await page.evaluate(()=>{const header=document.querySelector('.topbar').getBoundingClientRect(),workspace=document.querySelector('.workspace').getBoundingClientRect(),body=document.querySelector('.app-body').getBoundingClientRect();return {headerBottom:header.bottom,workspaceTop:workspace.top,left:workspace.left-body.left,right:body.right-workspace.right};});
+  assert.ok(shellGeometry.workspaceTop-shellGeometry.headerBottom>=15,'Studio needs clear space below the window header');
+  assert.ok(Math.abs(shellGeometry.left-shellGeometry.right)<=1,'Studio should be centered within the content column');
+  if(process.env.HOLOQA_SCREENSHOTS){await mkdir(process.env.HOLOQA_SCREENSHOTS,{recursive:true});await page.screenshot({path:join(process.env.HOLOQA_SCREENSHOTS,'desktop-overview.png'),fullPage:true});}
+  await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Test plan',exact:true}).click();
+  assert.equal(await page.getByRole('button',{name:'Check readiness & continue'}).isEnabled(),false);
   await page.getByRole('checkbox').check();
   // Approval must finish at the engine before editing the approved bytes.
   await page.waitForFunction(()=>{
@@ -68,26 +77,29 @@ try {
   });
   // Edit after human review: launch must refuse before any provider/model work.
   await writeFile(join(project,'holoqa.plan.yaml'),source.replace('Ready','Changed'));
-  await page.getByRole('button',{name:'Start supervised run'}).click();
-  await page.getByRole('dialog').getByRole('button',{name:'Start run',exact:true}).click();
-  await page.getByRole('alert').filter({hasText:'changed'}).waitFor();
-  await page.getByRole('button',{name:'Reload',exact:false}).click();
-  await page.getByText('"text_contains": "Changed"',{exact:false}).waitFor();
+  await page.getByRole('button',{name:'Check readiness & continue'}).click();
+  await page.getByRole('dialog').getByRole('button',{name:'Complete readiness checks first',exact:true}).waitFor();
+  assert.equal(await page.getByRole('dialog').getByRole('button',{name:'Complete readiness checks first',exact:true}).isEnabled(),false);
+  await page.getByRole('dialog').getByRole('button',{name:'Close dialog'}).click();
+  await page.getByRole('button',{name:'Refresh plan',exact:true}).click();
+  await page.getByText('Changed',{exact:false}).first().waitFor();
   assert.equal(await page.getByRole('checkbox').isChecked(),false);
   await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Run history',exact:true}).click();
   await page.getByRole('heading',{name:'No saved runs yet.'}).waitFor();
   await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Agent & target',exact:true}).click();
-  await page.getByRole('button',{name:'Check connection',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Check Codex connection',exact:true}).waitFor();
   await page.getByRole('button',{name:'Command palette',exact:true}).click();
   await page.getByRole('dialog').getByRole('button',{name:'Overview',exact:false}).click();
-  for(const width of [1440,1000,800]){await page.setViewportSize({width,height:1050});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,`Layout overflow at ${width}`);}
+  for(const width of [1920,1440,1280,1100,1000,900,800,768,760,640,560,430,360]){await page.setViewportSize({width,height:1050});const overflow=await page.evaluate(()=>({width:document.documentElement.scrollWidth,items:[...document.querySelectorAll('body *')].map(e=>({e,r:e.getBoundingClientRect()})).filter(({r})=>r.right>innerWidth+1).slice(0,8).map(({e,r})=>`${e.tagName}.${e.className?.baseVal||e.className} ${Math.round(r.left)}..${Math.round(r.right)}`)}));assert.equal(overflow.width,width,`Layout overflow at ${width}: ${overflow.items.join('; ')}`);}
+  await page.setViewportSize({width:1440,height:1050});
   // Start a real engine run against a deterministic Codex protocol peer.
   // The peer cannot run commands and never makes a model call.
   await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Test plan',exact:true}).click();
   await page.getByRole('checkbox').check();
   await page.waitForFunction(()=>!document.querySelector('.review-footer .button').disabled);
-  await page.getByRole('button',{name:'Start supervised run'}).click();
-  await page.getByRole('dialog').getByRole('button',{name:'Start run',exact:true}).click();
+  await page.getByRole('button',{name:'Check readiness & continue'}).click();
+  await page.getByRole('dialog').getByRole('button',{name:'Start supervised run',exact:true}).waitFor();
+  await page.getByRole('dialog').getByRole('button',{name:'Start supervised run',exact:true}).click();
   await page.getByRole('heading',{name:'Codex is waiting for approval'}).waitFor();
   await page.getByRole('dialog').getByRole('button',{name:'Pause run',exact:true}).click();
   await page.getByRole('button',{name:'Resume run',exact:true}).waitFor();
@@ -99,7 +111,7 @@ try {
   await page.getByRole('button',{name:'Pause run',exact:true}).waitFor();
   await page.getByRole('button',{name:'Pause run',exact:true}).click();
   await page.getByRole('button',{name:'Resume run',exact:true}).waitFor();
-  for(const width of [1440,1000,800]){await page.setViewportSize({width,height:1050});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,`Paused layout overflow at ${width}`);}
+  for(const width of [1920,1440,1280,1100,1000,900,800,768,760,640,560,430,360]){await page.setViewportSize({width,height:1050});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,`Paused layout overflow at ${width}`);}
   await page.setViewportSize({width:1440,height:1050});
   if(process.env.HOLOQA_SCREENSHOTS)await page.screenshot({path:join(process.env.HOLOQA_SCREENSHOTS,'desktop-paused.png'),fullPage:true});
   await page.getByRole('button',{name:'Stop run',exact:true}).click();
@@ -126,13 +138,13 @@ try {
   await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Overview',exact:true}).click();
   await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Create plan',exact:true}).click();
   assert.match(await page.getByLabel('Plan YAML',{exact:true}).inputValue(),/Reviewed checkout draft/);
-  for(const width of [1440,1000,800]){await page.setViewportSize({width,height:1050});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,`Authoring overflow at ${width}`);}
+  for(const width of [1920,1440,1280,1100,1000,900,800,768,760,640,560,430,360]){await page.setViewportSize({width,height:1050});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,`Authoring overflow at ${width}`);}
   await page.setViewportSize({width:1440,height:1050});
   if(process.env.HOLOQA_SCREENSHOTS)await page.screenshot({path:join(process.env.HOLOQA_SCREENSHOTS,'desktop-authoring.png'),fullPage:true});
   await page.getByRole('button',{name:'Save and review',exact:true}).click();
   await page.getByRole('heading',{name:'Reviewed checkout draft',exact:true}).waitFor();
   assert.equal(await page.getByRole('checkbox').isChecked(),false);
-  assert.equal(await page.getByRole('button',{name:'Start supervised run'}).isEnabled(),false);
+  assert.equal(await page.getByRole('button',{name:'Check readiness & continue'}).isEnabled(),false);
   await page.getByRole('navigation',{name:'Project pages'}).getByRole('button',{name:'Create plan',exact:true}).click();
   await page.getByLabel('Plan YAML',{exact:true}).fill((await page.getByLabel('Plan YAML',{exact:true}).inputValue()).replace('Reviewed checkout draft','Unsaved local edit'));
   await page.getByRole('button',{name:'Attach documents',exact:true}).click();
@@ -155,6 +167,7 @@ try {
   console.log('UI + real stdio engine smoke passed: discovery, review, external edit refusal, history, navigation, responsive layout, approval→pause→resume→pause→stop, document attachment→agent draft→edit→save→mandatory review. No model calls.');
 } finally {
   if(browser)await browser.close();
+  await new Promise(resolve=>targetServer.close(resolve));
   engine.stdin.end();lines.close();vite.kill();
   await new Promise(r=>{if(engine.exitCode!==null)return r();engine.once('exit',r);setTimeout(()=>{engine.kill();r();},3000).unref();});
   await rm(temp,{recursive:true,force:true});

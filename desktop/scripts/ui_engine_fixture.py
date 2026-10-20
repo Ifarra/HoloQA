@@ -49,7 +49,10 @@ if "--peer" in sys.argv:
 from holoqa import desktop
 from holoqa.desktop_codex import CodexSession
 original_which = desktop.shutil.which
-desktop.shutil.which = lambda name: "fixture-browser" if name == "agent-browser" else original_which(name)
+desktop.shutil.which = lambda name: (
+    "fixture-browser" if name == "agent-browser" else
+    "fixture-codex" if name == "codex" else original_which(name)
+)
 desktop.CodexSession = lambda cwd, emit, tool=None, **kwargs: CodexSession(
     cwd, emit, tool, command=[sys.executable, "-u", str(Path(__file__).resolve()), "--peer"], **kwargs)
 desktop.main()

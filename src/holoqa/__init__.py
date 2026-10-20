@@ -5,7 +5,7 @@ and computes verdicts by comparing captures against a human-written plan.
 The connected AI client supplies the reasoning; HoloQA supplies the proof.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 PASS = "PASS"
 FAIL = "FAIL"

@@ -1,21 +1,20 @@
-# HoloQA Desktop — Windows foundation
+# HoloQA Desktop
 
-An initial Tauri 2 / React / TypeScript desktop on the approved Studio design.
-The existing Python engine runs as a persistent stdio sidecar. This branch is
-based on `codex/new-work-2026-10-19` at `59ac2ad` so it includes that branch's
-browser lifecycle and Windows process-tree fixes.
+A Windows desktop workspace for local projects, evidence-backed QA plans, and
+supervised browser scans. The Tauri 2 / React / TypeScript interface runs the
+Python engine as a persistent stdio sidecar.
 
-## What works in this milestone
+## Implemented features
 
 - Native folder selection and recent projects; bounded, read-only plan discovery.
 - Existing plan loading, validation, warnings, full check review, and exact-byte
   review tokens. A changed plan or resolved target requires a fresh review.
-- Prompt-based Codex plan drafts, reference document attachments, and external YAML import.
+- Prompt-based plan drafts with Codex, Claude Code, or OpenCode; reference document attachments and external YAML import.
 - Editable draft previews, schema validation, explicit new-file save, and mandatory plan review.
 - Explicit starter-plan creation that refuses to overwrite an existing file.
-- Codex app-server initialization and existing account-state checks. No credential
+- Codex and Claude initialization with existing account-state checks. No credential
   file reads, token copies, global configuration edits, or interactive login.
-- Supervised Codex execution with command approval requests, Allow once / Deny,
+- Supervised Codex and Claude execution with provider-specific approvals,
   source-change refusals, pause/resume, cancellation, and a 30-minute session limit.
 - In-process HoloQA tools for browser operation, capture, and judgment; tool calls
   cannot choose another run or assert PASS/FAIL. The same sidecar owns the ledger
@@ -25,7 +24,7 @@ browser lifecycle and Windows process-tree fixes.
   because their saved steps say PASS.
 - Windows x64 sidecar packaging, an executable smoke check, and NSIS installer CI.
 
-Pause requests a Codex turn interruption and rejects outstanding approvals.
+Pause requests provider interruption and rejects outstanding approvals.
 The interface shows **Pausing** until interruption is confirmed and an in-flight
 QA tool finishes. **Paused** retains the same browser, pinned plan, provider
 thread, and owning Python ledger; resume starts another turn on that same thread.
@@ -38,9 +37,8 @@ is not supported, and saved history does not restore trusted evidence authority.
 Session controls remain visible when inspecting another run. Project switching,
 new runs, plan creation, and report export are blocked during an active session.
 
-The browser preview has **no engine connection and no invented run results**.
-The separate earlier design prototype remains in `/workspace/holoqa-desktop-design`;
-it is not a dependency of this app.
+This is an unsigned preview. Interactive acceptance with real Windows provider
+and browser sessions remains pending.
 
 ## Windows development
 
@@ -65,34 +63,44 @@ requirement, so iterating against the interpreter does not require rebuilding
 the PyInstaller executable. The development CSP permits Vite's loopback HMR;
 the release CSP permits only packaged scripts and the native IPC transport.
 
-For QA, install and sign into your own Codex CLI in the same Windows user account.
-The adapter baseline is **codex-cli 0.159.2**. This uses its experimental dynamic
-tool protocol; incompatible versions fail the handshake/start request and do not
-fall back to unattended execution. The adapter's protocol shapes were checked
-against this CLI's generated schemas, not guessed from `codex exec` output.
+For QA, install and sign into either Codex CLI or Claude Code in the same
+Windows user account. Codex uses the app-server adapter (baseline
+**codex-cli 0.159.2**) with per-command approvals. Claude uses its stream-json
+CLI with a strict allowlist of HoloQA evidence tools; it cannot run arbitrary
+commands or edit project files. Both support pause, resume, stop, and the same
+HoloQA evidence ledger. Claude resumes with the same CLI session after a pause.
 
 ```powershell
 codex login
+# Or install Claude Code and sign in with `claude`.
 npm install -g agent-browser
 agent-browser install
 ```
 
-Use Agent & target → Check connection to check the provider. Start your local or
-staging application yourself. Open a project, choose its plan, read all checks,
-and approve it. The preflight identifies the target and warns that a plan may
-submit forms or modify test data. Starting a run also verifies current provider
-authentication and browser-driver presence. There is no automatic app startup
-or silent installation.
+Use Agent & target → choose a scan agent and check its connection. You can start
+the application yourself or enter an explicit project startup command (npm,
+pnpm, yarn, bun, uv, or Python); HoloQA starts it only after you click and waits
+for the target URL to respond. The command runs without a shell and is stopped
+when you switch projects or close HoloQA. Open a project, choose its plan, read
+all checks, and approve it. The preflight verifies that the reviewed plan is
+unchanged, the target responds, the browser driver is installed, and the selected
+provider is signed in. A run may submit forms or modify test data.
+
+The plan composer saves prompt and YAML edits in this device's local browser
+storage and offers to restore them when reopened. After a desktop restart, open
+the project and choose **Reopen run & evidence** to inspect its latest saved run;
+a live provider session can resume only while the desktop process remains open.
 
 Codex runs with read-only sandboxing and user-routed command approvals. HoloQA's
-hosted dynamic tools perform the intended browser actions and evidence writes.
-Native commands may be requested by Codex; review their full command, directory,
-and reason before allowing them. Source-edit requests are always denied during
+hosted tools perform the intended browser actions and evidence writes. Native
+commands may be requested by Codex; review their full command, directory, and
+reason before allowing them. Claude can call only HoloQA's named evidence tools;
+it has no shell or source-edit permission. Source-edit requests are denied during
 QA. Unknown provider requests receive an error without permissions being granted.
 Prompts and project context sent to Codex follow your configured provider's data
 handling; a local engine does not mean local model inference.
 
-## Create a plan from a prompt or documents (0.2.0 development)
+## Create a plan from a prompt or documents
 
 Open a project and select **Create plan**. Enter an application name, its running
 HTTP(S) URL, and what to test. **Attach documents** accepts UTF-8 TXT/Markdown,
@@ -106,8 +114,9 @@ with runtime/output limits and can be cancelled. A rejected batch attaches no
 partial results. Original files stay in place; extracted text and attachment
 metadata live in memory until the project changes or the desktop closes.
 
-**Generate plan with Codex** explicitly sends the request and the selected
-extracted document text to the existing configured Codex provider. Do not attach
+**Generate plan with [agent]** explicitly sends the request and selected
+extracted document text to the chosen provider's existing CLI sign-in. Plan
+drafting supports Codex, Claude Code, and OpenCode. Do not attach
 secrets you do not intend to send. Drafting has a separate ephemeral provider
 thread, a five-minute deadline, and no HoloQA browser/evidence tools. Shell, browser, search, plugin, hook, and inherited MCP tools are disabled for
 drafting; shell/file-change approvals are declined. HoloQA passively reads Codex
@@ -126,7 +135,8 @@ proposal, so save a draft you want to keep first. **Import plan file** provides
 the same editable preview/save/review flow for existing YAML, without a model
 call. Plans already discovered inside the project can still be loaded directly.
 
-During analysis, Codex can pause with a focused question when a requirement or
+During analysis, the selected planning agent can pause with a focused question
+when a requirement or
 repository decision is ambiguous. Choose one of the offered answers in the
 HITL panel and the same draft thread continues; cancelling the draft also
 cancels a pending question. This keeps uncertain assumptions out of the saved
@@ -227,12 +237,12 @@ run shell actions or contact a model. The test does not exercise native WebView2
 
 A real Windows acceptance pass is still necessary: install the NSIS artifact,
 open a folder containing spaces and non-ASCII characters, sign into a supported
-Codex CLI, exercise both approval choices, run a local fixture, inspect its
-capture, pause/resume, cancel mid-run, and close the window with a provider child alive.
+Codex or Claude CLI, exercise Codex approval choices, run a local fixture, inspect
+its capture, pause/resume both providers, cancel mid-run, and close the window with a provider child alive.
 CI packaging and a fake peer do not substitute for that interactive test.
 
-This foundation does not yet include Claude/OpenCode adapters, automatic app commands, live browser embedding,
-secret entry UI, login recovery, or cross-session active-run reattachment.
+This foundation does not yet include OpenCode scan support, live browser embedding,
+provider login recovery, or cross-session active-run reattachment.
 Starter plans need real assertions edited by the project owner. Run comparisons
 are currently the saved counts shown together; richer per-check diffs follow
 after the first Windows proof. Packaging and provider behavior need validation
@@ -243,9 +253,8 @@ times out; immediate preflight cancellation remains follow-up work.
 
 ## Versions and GitHub Releases
 
-Desktop and engine versions are independent. The development desktop version is
-`0.2.0` (unreleased); the published download remains `0.1.1`. The bundled Python engine is `2.0.0`. Desktop tags use
-`desktop-vX.Y.Z` so they do not collide with engine releases.
+Desktop and engine versions are independent. The current desktop preview is
+`0.3.0`; the bundled Python engine is `2.1.0`. Desktop tags use `desktop-vX.Y.Z` so they do not collide with engine releases.
 [Desktop changelog](CHANGELOG.md) records each version. Before 1.0, patch
 versions carry fixes and minor versions introduce capabilities or compatibility
 changes; document breaking changes explicitly.
@@ -254,9 +263,9 @@ changes; document breaking changes explicitly.
 shipped desktop metadata with:
 
 ```powershell
-python desktop/scripts/version.py --set 0.1.2
+python desktop/scripts/version.py --set 0.3.1
 python desktop/scripts/version.py --check
-python desktop/scripts/version.py --check --tag desktop-v0.1.2
+python desktop/scripts/version.py --check --tag desktop-v0.3.1
 ```
 
 This updates the npm manifest/lock, Tauri config, Rust manifest/lock, and Python
@@ -264,12 +273,12 @@ app-server client version. It leaves the Python engine version and dependency
 versions alone. Use three numeric components; preview status is a GitHub
 prerelease flag so Windows installer version comparison stays predictable.
 
-Commit the version bump and changes, let the PR tests pass, and tag the intended
-release commit:
+After the PR checks pass and the release commit reaches main, tag that exact
+commit:
 
 ```powershell
-git tag -a desktop-v0.1.2 <release-commit> -m "HoloQA Desktop 0.1.2 Preview"
-git push origin desktop-v0.1.2
+git tag -a desktop-v0.3.1 <release-commit> -m "HoloQA Desktop 0.3.1 Preview"
+git push origin desktop-v0.3.1
 ```
 
 The tag workflow verifies that tag and metadata agree, reruns Windows engine/UI

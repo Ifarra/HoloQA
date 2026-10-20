@@ -54,29 +54,49 @@ def configure(run, directory: Path, env: dict[str, str]) -> None:
 
 def cleanup(run) -> list[str]:
     """Close only sessions actually used by this run; leave failures retryable."""
-    from holoqa.browser_driver import raw
+    from holoqa.browser_driver import raw, session_lock_path
     from holoqa.storage import atomic_json, file_lock
     registry = run.out_dir / "browser-sessions.json"
     errors = []
-    with file_lock(run.dir / ".browser.lock"):
-        if not registry.is_file():
-            return []
-        state = json.loads(registry.read_text())
-        binary = os.environ.get("HOLOQA_BROWSER_BINARY") or shutil.which("agent-browser")
-        if not binary:
-            return ["agent-browser is unavailable; owned sessions still need cleanup"]
-        remaining = []
-        for session in state["active"]:
-            prefix = session_name(run.dir, "").rsplit("-", 1)[0] + "-"
-            if not session.startswith(prefix):
-                errors.append("Refused cleanup of an unowned session")
-                remaining.append(session)
-                continue
+    try:
+        # The OS lock is the cleanup owner; unlike a PID marker, it cannot be
+        # confused by PID reuse and is released automatically after a crash.
+        with file_lock(run.dir / ".browser-cleanup.lock", timeout=0):
+            with file_lock(run.dir / ".browser.lock"):
+                if not registry.is_file():
+                    return []
+                state = json.loads(registry.read_text())
+                pending = list(state["active"])
+                binary = os.environ.get("HOLOQA_BROWSER_BINARY") or shutil.which("agent-browser")
+                if not binary:
+                    return ["agent-browser is unavailable; owned sessions still need cleanup"]
+                state["closing"] = True
+                atomic_json(registry, state)
             try:
-                raw(["close"], {**os.environ, "HOLOQA_BROWSER_BINARY": binary,
-                                "AGENT_BROWSER_SESSION": session}, timeout=10)
-            except (OSError, ValueError, subprocess.SubprocessError) as error:
-                remaining.append(session)
-                errors.append(f"{session}: {error}")
-        atomic_json(registry, {"active": remaining})
+                for session in pending:
+                    prefix = session_name(run.dir, "").rsplit("-", 1)[0] + "-"
+                    if not session.startswith(prefix):
+                        errors.append("Refused cleanup of an unowned session")
+                        continue
+                    try:
+                        with file_lock(session_lock_path(run.dir, session)):
+                            raw(["close"], {**os.environ, "HOLOQA_BROWSER_BINARY": binary,
+                                            "AGENT_BROWSER_SESSION": session}, timeout=10)
+                    except (OSError, ValueError, subprocess.SubprocessError) as error:
+                        errors.append(f"{session}: {error}")
+                        continue
+                    with file_lock(run.dir / ".browser.lock"):
+                        if registry.is_file():
+                            state = json.loads(registry.read_text())
+                            if session in state["active"]:
+                                state["active"].remove(session)
+                                atomic_json(registry, state)
+            finally:
+                with file_lock(run.dir / ".browser.lock"):
+                    if registry.is_file():
+                        state = json.loads(registry.read_text())
+                        if state.pop("closing", None) is not None:
+                            atomic_json(registry, state)
+    except TimeoutError:
+        return ["Browser cleanup is already in progress"]
     return errors

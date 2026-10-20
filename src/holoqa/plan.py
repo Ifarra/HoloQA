@@ -304,16 +304,17 @@ def _brace_hint(error: Exception) -> str:
     return ""
 
 
-def _expand_env(value: str) -> str:
+def _expand_env(value: str, environ: dict[str, str] | None = None) -> str:
     """Replace ``${VAR}`` with the environment value, or leave it visible.
 
     An unset variable is left as-is rather than blanked, so a misconfigured
     base URL fails loudly at request time instead of silently targeting ``/``.
     """
-    return _ENV.sub(lambda m: os.environ.get(m.group(1), m.group(0)), value)
+    values = os.environ if environ is None else environ
+    return _ENV.sub(lambda m: values.get(m.group(1), m.group(0)), value)
 
 
-def load(path: str | Path) -> Plan:
+def load(path: str | Path, *, environ: dict[str, str] | None = None) -> Plan:
     """Read and validate a plan file. Never executes anything."""
     plan_path = Path(path).expanduser().resolve()
     if not plan_path.is_file():
@@ -329,7 +330,7 @@ def load(path: str | Path) -> Plan:
 
     meta = data.get("meta") or {}
     if isinstance(meta, dict) and meta.get("base_url"):
-        meta["base_url"] = _expand_env(str(meta["base_url"]))
+        meta["base_url"] = _expand_env(str(meta["base_url"]), environ)
     # Actor credentials arrive as ${ENV} too. Expanding them here means a secret
     # never reaches disk in a plan file, and the redaction layer sees a resolved
     # value it can strip if one ever lands in a captured body.
@@ -347,7 +348,7 @@ def load(path: str | Path) -> Plan:
                     )
                 for field in ("password", "login", "as"):
                     if isinstance(actor.get(field), str):
-                        actor[field] = _expand_env(actor[field])
+                        actor[field] = _expand_env(actor[field], environ)
 
     # A section whose entries are all commented out parses as null, not as an
     # empty list. That is the first thing a new user does to the template, so

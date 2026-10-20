@@ -57,6 +57,26 @@ def test_all_adapters_make_isolated_mcp_configuration(tmp_path, monkeypatch):
     assert "--sandbox" not in unattended.command
 
 
+def test_desktop_claude_uses_only_holoqa_tools_and_denies_source_edits(tmp_path, monkeypatch):
+    run = _run(tmp_path)
+    monkeypatch.setattr(agent_module, "provider_binary", lambda provider: f"/{provider}")
+    spec = agent_module.build_launch(
+        agent_module.AgentRunRequest(provider="claude", cwd=tmp_path, desktop_run=True),
+        run, "test prompt", tmp_path,
+    )
+    command = spec.command
+    assert "--permission-mode" in command and command[command.index("--permission-mode") + 1] == "dontAsk"
+    assert "--permission-prompts" in command and command[command.index("--permission-prompts") + 1] == "none"
+    assert "acceptEdits" not in command
+    allowed = command[command.index("--allowedTools") + 1:]
+    assert allowed == [
+        "mcp__holoqa__holoqa_browser", "mcp__holoqa__holoqa_observe",
+        "mcp__holoqa__holoqa_judge", "mcp__holoqa__holoqa_block",
+        "mcp__holoqa__holoqa_note", "mcp__holoqa__holoqa_run_status", "test prompt",
+    ]
+    assert not any(item.startswith("Bash(") for item in command)
+
+
 def test_launch_records_manifest_and_holoqa_remains_authoritative(tmp_path, monkeypatch, capsys):
     run = _run(tmp_path)
     request = agent_module.AgentRunRequest(provider="codex", cwd=tmp_path)
