@@ -12,6 +12,15 @@ from holoqa.desktop_authoring import PlanAuthor, validate_yaml
 from holoqa.desktop_codex import CodexSession
 
 YAML = 'meta:\n  app: shop\n  base_url: http://localhost:3000\nsteps:\n  - id: checkout\n    title: Order confirmed\n    expect:\n      - text_contains: Order confirmed\n'
+
+
+@pytest.fixture(autouse=True)
+def fake_installed_planning_agents(monkeypatch):
+    # These tests launch a deterministic protocol peer through Python; CI does
+    # not install the real provider CLIs and should not need to.
+    monkeypatch.setattr('holoqa.desktop_authoring.shutil.which', lambda _name: '/fake/provider')
+
+
 PEER = r'''
 import json,sys
 plan = json.loads(sys.argv[1]);mode=sys.argv[2]
