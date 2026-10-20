@@ -363,7 +363,9 @@ class Engine:
         if not isinstance(command, str) or len(command) > 1000:
             raise DesktopError("Enter a startup command shorter than 1000 characters")
         try:
-            args=shlex.split(command, posix=os.name != "nt")
+            # POSIX parsing strips the quotes around Windows executable paths
+            # while preserving their backslashes, which is what Popen needs.
+            args=shlex.split(command, posix=True)
         except ValueError as error:
             raise DesktopError(f"Invalid startup command: {error}") from error
         if not args or Path(args[0]).name.lower().removesuffix(".cmd").removesuffix(".exe") not in {"npm","pnpm","yarn","bun","uv","python","python3"}:

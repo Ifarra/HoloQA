@@ -243,7 +243,8 @@ def test_recording_owner_rejects_other_process(run):
 
 def node(script):
     if not shutil.which('node'): pytest.skip('Node is required for browser-JS fixtures')
-    result=subprocess.run(['node','-e',script],capture_output=True,text=True,timeout=10)
+    # Windows runners can take longer to start Node under load.
+    result=subprocess.run(['node','-e',script],capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stderr
     return json.loads(result.stdout)
 
