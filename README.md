@@ -10,7 +10,9 @@
 
 
 
-https://github.com/user-attachments/assets/52d74fa0-aefa-46ae-b56d-5d6b938bbb9b
+<video src="https://github.com/user-attachments/assets/52d74fa0-aefa-46ae-b56d-5d6b938bbb9b" controls muted playsinline preload="metadata" width="100%">
+  Your browser does not support embedded video. <a href="https://github.com/user-attachments/assets/52d74fa0-aefa-46ae-b56d-5d6b938bbb9b">Watch the HoloQA desktop walkthrough.</a>
+</video>
 
 
 

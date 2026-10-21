@@ -33,5 +33,5 @@ body{color:#F7F7F9;background:#0E0E12}
 .workspace{margin-top:16px}
 @media(max-width:380px){.topbar .brand img{width:106px}.topbar .divider,.topbar .project-name,.top-end>.button{display:none}.top-end{gap:6px}.top-end .circle{flex:0 0 30px;width:30px;height:30px}.window-controls{gap:0;margin-left:0}.window-controls button{width:24px}}
 .rail{background:#18181E;border-right-color:#30303A}
-.rail .rail-logo{color:#F7F7F9;background:#1A12C8}
+.rail .rail-logo{color:#F7F7F9;background:transparent}
 .button:not(.secondary):not(.danger){background:linear-gradient(120deg,#8F89FF,#7C76FF 58%,#1A12C8);border-color:#8F89FF;color:#F7F7F9}
