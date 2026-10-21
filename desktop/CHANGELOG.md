@@ -4,6 +4,11 @@ Desktop releases use `desktop-vX.Y.Z` tags. The Python engine has an independent
 version line. Before 1.0, patch versions carry fixes; minor versions introduce
 capabilities or compatibility changes, with breaking changes called out here.
 
+## 0.3.3 — Preview — 2026-10-21
+
+- Remove the cobalt fill behind the transparent sidebar monogram.
+- Embed the desktop walkthrough visibly in the GitHub README with a fallback link.
+
 ## 0.3.2 — Preview — 2026-10-20
 
 - Use transparent cobalt-shifted wordmark and monogram artwork across the desktop, Windows installer, browser icons, repository, and website.

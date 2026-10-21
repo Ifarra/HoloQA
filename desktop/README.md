@@ -254,7 +254,7 @@ times out; immediate preflight cancellation remains follow-up work.
 ## Versions and GitHub Releases
 
 Desktop and engine versions are independent. The current desktop preview is
-`0.3.2`; the bundled Python engine is `2.1.0`. Desktop tags use `desktop-vX.Y.Z` so they do not collide with engine releases.
+`0.3.3`; the bundled Python engine is `2.1.0`. Desktop tags use `desktop-vX.Y.Z` so they do not collide with engine releases.
 [Desktop changelog](CHANGELOG.md) records each version. Before 1.0, patch
 versions carry fixes and minor versions introduce capabilities or compatibility
 changes; document breaking changes explicitly.
@@ -263,9 +263,9 @@ changes; document breaking changes explicitly.
 shipped desktop metadata with:
 
 ```powershell
-python desktop/scripts/version.py --set 0.3.2
+python desktop/scripts/version.py --set 0.3.3
 python desktop/scripts/version.py --check
-python desktop/scripts/version.py --check --tag desktop-v0.3.2
+python desktop/scripts/version.py --check --tag desktop-v0.3.3
 ```
 
 This updates the npm manifest/lock, Tauri config, Rust manifest/lock, and Python
@@ -277,8 +277,8 @@ After the PR checks pass and the release commit reaches main, tag that exact
 commit:
 
 ```powershell
-git tag -a desktop-v0.3.2 <release-commit> -m "HoloQA Desktop 0.3.2 Preview"
-git push origin desktop-v0.3.2
+git tag -a desktop-v0.3.3 <release-commit> -m "HoloQA Desktop 0.3.3 Preview"
+git push origin desktop-v0.3.3
 ```
 
 The tag workflow verifies that tag and metadata agree, reruns Windows engine/UI

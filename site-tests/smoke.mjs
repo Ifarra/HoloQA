@@ -20,7 +20,7 @@ await new Promise(r => server.listen(0, '127.0.0.1', r));
 const url = `http://127.0.0.1:${server.address().port}/HoloQA/`;
 const browser = await chromium.launch({executablePath: process.env.CHROMIUM_EXECUTABLE || undefined, args:['--no-sandbox']});
 const errors = [];
-const fallback = 'https://github.com/Ifarra/HoloQA/releases/download/desktop-v0.3.2/HoloQA-Desktop-0.3.2-windows-x64-setup.exe';
+const fallback = 'https://github.com/Ifarra/HoloQA/releases/download/desktop-v0.3.3/HoloQA-Desktop-0.3.3-windows-x64-setup.exe';
 async function open(metadata = [], javascript = true) {
   const context = await browser.newContext({viewport:{width:1440,height:1000}, reducedMotion:'reduce', javaScriptEnabled:javascript, permissions: javascript ? ['clipboard-read','clipboard-write'] : []});
   const page = await context.newPage();
